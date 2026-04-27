@@ -1,0 +1,19 @@
+.DS_Store
+*.log
+
+node_modules/
+dist/
+venv/
+pydeps/
+
+.env
+.env.*
+!.env.example
+
+# Local scratch or unrelated datasets
+data/
+
+# Local-only captures and internal notes
+IMG_0906.HEIC.png
+docs/internal/
+docs/proposal/AtomFolio+_Proposal.pdf

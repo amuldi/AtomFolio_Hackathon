@@ -1,0 +1,169 @@
+import http from 'node:http';
+import { createReadStream, existsSync } from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { ingestPortfolioText } from './portfolioIngestion.mjs';
+import {
+  enrichSecurityIdentifiers,
+  enrichSecurityItems,
+  getSecurityEnrichmentCacheStats,
+} from './securityEnrichment.mjs';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const projectRoot = path.resolve(__dirname, '..');
+const distRoot = path.join(projectRoot, 'dist');
+const shouldServeStatic = process.argv.includes('--static');
+const port = Number(process.env.PORT ?? 8787);
+const host = process.env.HOST ?? '127.0.0.1';
+const MAX_BODY_SIZE = 8 * 1024 * 1024;
+
+const CONTENT_TYPES = {
+  '.html': 'text/html; charset=utf-8',
+  '.js': 'application/javascript; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
+  '.svg': 'image/svg+xml',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.webp': 'image/webp',
+  '.ico': 'image/x-icon',
+};
+
+function sendJson(response, statusCode, payload) {
+  response.writeHead(statusCode, {
+    'Content-Type': 'application/json; charset=utf-8',
+    'Cache-Control': 'no-store',
+  });
+  response.end(JSON.stringify(payload));
+}
+
+function readJsonBody(request) {
+  return new Promise((resolve, reject) => {
+    let body = '';
+
+    request.on('data', (chunk) => {
+      body += chunk;
+      if (Buffer.byteLength(body) > MAX_BODY_SIZE) {
+        reject(new Error('Request body too large.'));
+        request.destroy();
+      }
+    });
+
+    request.on('end', () => {
+      try {
+        resolve(body ? JSON.parse(body) : {});
+      } catch {
+        reject(new Error('Invalid JSON body.'));
+      }
+    });
+
+    request.on('error', reject);
+  });
+}
+
+async function serveStaticAsset(requestPath, response) {
+  if (!shouldServeStatic || !existsSync(distRoot)) {
+    sendJson(response, 404, { error: 'Not found.' });
+    return;
+  }
+
+  const decodedPath = decodeURIComponent(requestPath.split('?')[0]);
+  const sanitizedPath = path.normalize(decodedPath).replace(/^(\.\.[/\\])+/, '');
+  let assetPath = path.join(distRoot, sanitizedPath === '/' ? 'index.html' : sanitizedPath);
+
+  if (!assetPath.startsWith(distRoot)) {
+    sendJson(response, 403, { error: 'Forbidden.' });
+    return;
+  }
+
+  if (!existsSync(assetPath) || sanitizedPath === '/') {
+    assetPath = path.join(distRoot, 'index.html');
+  }
+
+  try {
+    const extension = path.extname(assetPath).toLowerCase();
+    response.writeHead(200, {
+      'Content-Type': CONTENT_TYPES[extension] ?? 'application/octet-stream',
+    });
+    createReadStream(assetPath).pipe(response);
+  } catch {
+    sendJson(response, 500, { error: 'Failed to serve asset.' });
+  }
+}
+
+const server = http.createServer(async (request, response) => {
+  const requestUrl = new URL(request.url ?? '/', `http://${request.headers.host ?? `${host}:${port}`}`);
+
+  if (request.method === 'GET' && requestUrl.pathname === '/api/health') {
+    sendJson(response, 200, {
+      ok: true,
+      securityEnrichment: getSecurityEnrichmentCacheStats(),
+    });
+    return;
+  }
+
+  if (request.method === 'POST' && requestUrl.pathname === '/api/securities/enrich') {
+    try {
+      const body = await readJsonBody(request);
+      const force = Boolean(body.force);
+
+      if (Array.isArray(body.items)) {
+        const payload = await enrichSecurityItems(body.items, { force });
+        sendJson(response, 200, payload);
+        return;
+      }
+
+      if (Array.isArray(body.identifiers)) {
+        const payload = await enrichSecurityIdentifiers(body.identifiers, { force });
+        sendJson(response, 200, payload);
+        return;
+      }
+
+      sendJson(response, 400, {
+        error: 'Provide an items array or identifiers array.',
+      });
+      return;
+    } catch (error) {
+      sendJson(response, 500, {
+        error: error instanceof Error ? error.message : 'Security enrichment failed.',
+      });
+      return;
+    }
+  }
+
+  if (request.method === 'POST' && requestUrl.pathname === '/api/portfolio/ingest') {
+    try {
+      const body = await readJsonBody(request);
+      const fileName = String(body.fileName ?? '').trim() || 'portfolio.csv';
+      const text = String(body.text ?? '');
+
+      if (!text.trim()) {
+        sendJson(response, 400, { error: 'Upload text is empty.' });
+        return;
+      }
+
+      const payload = await ingestPortfolioText(fileName, text);
+      sendJson(response, 200, payload);
+      return;
+    } catch (error) {
+      sendJson(response, 500, {
+        error: error instanceof Error ? error.message : 'Portfolio ingestion failed.',
+      });
+      return;
+    }
+  }
+
+  if (request.method === 'GET' || request.method === 'HEAD') {
+    await serveStaticAsset(requestUrl.pathname, response);
+    return;
+  }
+
+  sendJson(response, 405, { error: 'Method not allowed.' });
+});
+
+server.listen(port, host, () => {
+  const mode = shouldServeStatic ? 'api+static' : 'api';
+  console.log(`[atomfolio-backend] listening on http://${host}:${port} (${mode})`);
+});
