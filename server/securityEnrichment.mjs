@@ -196,8 +196,9 @@ function countLiveProfileItems(items) {
     );
 
     return (
-      String(item?.metadataSource ?? '').trim().toLowerCase() === 'wikidata' ||
+      ['wikidata', 'yahoo'].includes(String(item?.metadataSource ?? '').trim().toLowerCase()) ||
       sources.includes('wikidata') ||
+      sources.includes('yahoo') ||
       hasProfileFields
     );
   }).length;
@@ -255,6 +256,7 @@ export async function enrichSecurityItems(items, options = {}) {
   if (pendingEntries.length) {
     const enrichedPendingItems = await enrichPortfolioItemsWithLiveKnowledge(
       pendingEntries.map((entry) => entry.item),
+      { force },
     );
 
     pendingEntries.forEach((entry, index) => {

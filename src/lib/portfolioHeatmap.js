@@ -11,56 +11,105 @@ function clamp(value, min, max) {
 }
 
 function parseNumericValue(value) {
-  const trimmed = String(value ?? '').trim();
+  const trimmed = String(value ?? '').trim().replace(/[−–—]/g, '-');
   if (!trimmed) {
     return null;
   }
 
   const numeric = Number.parseFloat(trimmed.replace(/[^0-9.+-]/g, ''));
-  return Number.isFinite(numeric) ? numeric : null;
+  const shouldNegate = /^\(.*\)$/.test(trimmed) || /(?:손실|loss|▼|↓)/i.test(trimmed);
+  return Number.isFinite(numeric) ? (shouldNegate && numeric > 0 ? -numeric : numeric) : null;
 }
 
 function parsePercentValue(value, options = {}) {
-  const trimmed = String(value ?? '').trim();
+  const trimmed = String(value ?? '').trim().replace(/[−–—]/g, '-');
   if (!trimmed) {
     return null;
   }
 
   const { explicitPercent = false } = options;
-  const numeric = Number.parseFloat(trimmed.replace(/[,%\s]/g, ''));
+  const numeric = Number.parseFloat(trimmed.replace(/[^0-9.+-]/g, ''));
   if (!Number.isFinite(numeric)) {
     return null;
   }
+  const signedNumeric =
+    (/^\(.*\)$/.test(trimmed) || /(?:손실|loss|▼|↓)/i.test(trimmed)) && numeric > 0
+      ? -numeric
+      : numeric;
 
-  return explicitPercent || trimmed.includes('%') || Math.abs(numeric) > 1
-    ? numeric
-    : numeric * 100;
+  return explicitPercent || trimmed.includes('%') || Math.abs(signedNumeric) > 1
+    ? signedNumeric
+    : signedNumeric * 100;
 }
 
-function parseDateValue(value) {
+function createStrictDate(yearValue, monthValue, dayValue) {
+  const year = Number.parseInt(String(yearValue), 10);
+  const month = Number.parseInt(String(monthValue), 10);
+  const day = Number.parseInt(String(dayValue), 10);
+
+  if (!Number.isInteger(year) || !Number.isInteger(month) || !Number.isInteger(day)) {
+    return null;
+  }
+
+  if (year < 1900 || year > 2100 || month < 1 || month > 12 || day < 1 || day > 31) {
+    return null;
+  }
+
+  const parsed = new Date(year, month - 1, day);
+  if (
+    parsed.getFullYear() !== year ||
+    parsed.getMonth() !== month - 1 ||
+    parsed.getDate() !== day
+  ) {
+    return null;
+  }
+
+  return startOfDay(parsed);
+}
+
+function parseDateValue(value, options = {}) {
   const trimmed = String(value ?? '').trim();
   if (!trimmed) {
     return null;
   }
 
-  const compact = trimmed.replace(/[.\-/]/g, '');
-  if (/^\d{8}$/.test(compact)) {
-    const year = Number.parseInt(compact.slice(0, 4), 10);
-    const month = Number.parseInt(compact.slice(4, 6), 10) - 1;
-    const day = Number.parseInt(compact.slice(6, 8), 10);
-    const parsed = new Date(year, month, day);
-
-    return Number.isFinite(parsed.getTime()) ? startOfDay(parsed) : null;
+  const normalizedInput = trimmed
+    .replace(/^\ufeff/, '')
+    .replace(/\s+/g, ' ')
+    .replace(/[.]\s*$/g, '')
+    .trim();
+  const localizedDateMatch = normalizedInput.match(
+    /^(\d{4})\s*년\s*(\d{1,2})\s*월\s*(\d{1,2})\s*일?/,
+  );
+  if (localizedDateMatch) {
+    return createStrictDate(localizedDateMatch[1], localizedDateMatch[2], localizedDateMatch[3]);
   }
 
-  if (!/[-/.T:\s]/.test(trimmed) && !/[A-Za-z]{3,}/.test(trimmed)) {
+  const compact = normalizedInput.replace(/[.\-/]/g, '');
+  if (/^\d{8}$/.test(compact)) {
+    const compactDate = createStrictDate(compact.slice(0, 4), compact.slice(4, 6), compact.slice(6, 8));
+    if (compactDate) {
+      return compactDate;
+    }
+  }
+
+  if (options.allowExcelSerial && /^\d{5}(?:\.0+)?$/.test(normalizedInput)) {
+    const serial = Number.parseInt(normalizedInput, 10);
+    if (serial >= 25569 && serial <= 73050) {
+      const excelEpoch = Date.UTC(1899, 11, 30);
+      const parsed = new Date(excelEpoch + serial * 86400000);
+      return createStrictDate(parsed.getUTCFullYear(), parsed.getUTCMonth() + 1, parsed.getUTCDate());
+    }
+  }
+
+  if (!/[-/.T:\s]/.test(normalizedInput) && !/[A-Za-z]{3,}/.test(normalizedInput)) {
     return null;
   }
 
-  const normalized = trimmed
-    .replace(/\./g, '-')
+  const normalized = normalizedInput
+    .replace(/[./]/g, '-')
     .replace(
-      /^(\d{4}-\d{1,2}-\d{1,2})\s+(\d{1,2}:\d{2}(?::\d{2})?)(?:\s*(Z|[+-]\d{2}:?\d{2}))?$/,
+      /^(\d{4}-\d{1,2}-\d{1,2})\s+(?:오전|오후|AM|PM)?\s*(\d{1,2}:\d{2}(?::\d{2})?)(?:\s*(Z|[+-]\d{2}:?\d{2}))?$/i,
       (_, datePart, timePart, zonePart = '') => `${datePart}T${timePart}${zonePart}`,
     );
   const isoDateTimeMatch = normalized.match(
@@ -68,18 +117,21 @@ function parseDateValue(value) {
   );
   if (isoDateTimeMatch) {
     const [, year, month, day] = isoDateTimeMatch;
-    const parsed = new Date(Number(year), Number(month) - 1, Number(day));
-    return Number.isFinite(parsed.getTime()) ? startOfDay(parsed) : null;
+    return createStrictDate(year, month, day);
   }
 
   const shortDateTimeMatch = normalized.match(
-    /^(\d{1,2})-(\d{1,2})-(\d{2,4})(?:[T\s](\d{1,2}):(\d{2})(?::(\d{2}))?)?$/,
+    /^(\d{1,2})-(\d{1,2})-(\d{2,4})(?:[T\s](?:오전|오후|AM|PM)?\s*(\d{1,2}):(\d{2})(?::(\d{2}))?)?$/i,
   );
   if (shortDateTimeMatch) {
-    const [, month, day, rawYear] = shortDateTimeMatch;
+    const [, first, second, rawYear] = shortDateTimeMatch;
     const year = rawYear.length === 2 ? `20${rawYear}` : rawYear;
-    const parsed = new Date(Number(year), Number(month) - 1, Number(day));
-    return Number.isFinite(parsed.getTime()) ? startOfDay(parsed) : null;
+    const firstNumber = Number.parseInt(first, 10);
+    const secondNumber = Number.parseInt(second, 10);
+    const dayFirst = firstNumber > 12 && secondNumber <= 12;
+    return dayFirst
+      ? createStrictDate(year, second, first)
+      : createStrictDate(year, first, second);
   }
 
   const parsed = new Date(normalized);
@@ -123,18 +175,24 @@ function findFieldEntry(fields, candidates) {
   return null;
 }
 
+function isExplicitDateLabel(label) {
+  return /date|day|datetime|timestamp|tradedate|tradingdate|executiondate|settlementdate|orderdate|recorddate|valuedate|valuationdate|snapshotdate|asofdate|날짜|일자|기준일|거래일|매매일|체결일|약정일|주문일|평가일|조회일|매수일|매입일|취득일/.test(
+    normalizeText(label),
+  );
+}
+
 function findFallbackDateEntry(fields) {
   return (fields ?? []).find((field) => {
     const label = normalizeText(field.label);
     if (
-      /(stockcode|ticker|symbol|종목코드|stockname|securityname|assetname|productname|종목명|자산명|상품명|account|계좌|return|손익|수익률|buyprice|매수가|shares|수량)/.test(
+      /(stockcode|ticker|symbol|종목코드|stockname|securityname|assetname|productname|종목명|자산명|상품명|account|계좌|return|손익|수익률|buyprice|currentprice|price|매수가|현재가|가격|shares|수량)/.test(
         label,
       )
     ) {
       return false;
     }
 
-    return Boolean(parseDateValue(field.value));
+    return Boolean(parseDateValue(field.value, { allowExcelSerial: isExplicitDateLabel(field.label) }));
   }) ?? null;
 }
 
@@ -161,12 +219,19 @@ function extractDateEntry(fields) {
       '일자',
       '날짜',
       '기준일',
+      '기준일자',
       '거래일',
       '거래일자',
+      '거래일시',
+      '매매일',
+      '매매일자',
       '체결일',
+      '체결일시',
       '약정일',
       '주문일',
       '평가일',
+      '조회일',
+      '조회일자',
     ]) ??
     findFieldEntry(fields, [
       'buydate',
@@ -191,15 +256,21 @@ function extractValueEntry(fields) {
       'yield',
       'profitrate',
       'dailypnlrate',
+      'dailypnlpercent',
       'totalreturn',
       'returnpct',
       '수익률',
+      '수익율',
       '등락률',
       '변동률',
       '손익률',
+      '손익율',
       '평가손익률',
       '총수익률',
       '일간수익률',
+      '일별수익률',
+      '일일수익률',
+      '누적수익률',
     ]) ??
     findFieldEntry(fields, [
       'profitloss',
@@ -211,24 +282,29 @@ function extractValueEntry(fields) {
       'profit',
       'gain',
       '손익',
+      '수익',
+      '수익금',
+      '손익금',
       '평가손익',
       '실현손익',
       '손익금액',
       '손익액',
       '일손익',
       '일별손익',
+      '일수익',
+      '일별수익',
     ])
   );
 }
 
 function isPercentLikeValueLabel(label) {
-  return /%|pct|percent|dailyreturn|return|returns|performance|change|yield|profitrate|dailypnlrate|totalreturn|returnpct|수익률|등락률|변동률|손익률|평가손익률|총수익률|일간수익률|일일수익률|누적수익률/.test(
+  return /%|pct|percent|dailyreturn|return|returns|performance|change|yield|profitrate|dailypnlrate|totalreturn|returnpct|수익률|수익율|등락률|변동률|손익률|손익율|평가손익률|총수익률|일간수익률|일별수익률|일일수익률|누적수익률/.test(
     normalizeText(label),
   );
 }
 
 function isAbsoluteValueLabel(label) {
-  return /profitloss|gainloss|pnl|profitandloss|realizedpnl|unrealizedpnl|평가손익|실현손익|손익금액|손익액|일손익|일별손익/.test(
+  return /profitloss|gainloss|pnl|profitandloss|realizedpnl|unrealizedpnl|profit|gain|평가손익|실현손익|손익금액|손익액|손익금|수익금|수익|일손익|일별손익|일수익|일별수익/.test(
     normalizeText(label),
   );
 }
@@ -265,7 +341,9 @@ function extractTimelineEntries(items) {
     const fields = item.fields ?? [];
     const dateEntry = extractDateEntry(fields) ?? findFallbackDateEntry(fields);
     const valueEntry = extractValueEntry(fields);
-    const date = parseDateValue(dateEntry?.value);
+    const date = parseDateValue(dateEntry?.value, {
+      allowExcelSerial: isExplicitDateLabel(dateEntry?.label),
+    });
     const valueResult =
       readValueFromEntry(valueEntry) ??
       (() => {
@@ -303,7 +381,9 @@ function extractTimelineEntries(items) {
         ]) ??
         extractDateEntry(fields) ??
         findFallbackDateEntry(fields);
-      const date = parseDateValue(dateEntry?.value);
+      const date = parseDateValue(dateEntry?.value, {
+        allowExcelSerial: isExplicitDateLabel(dateEntry?.label),
+      });
       const value = parsePercentValue(item.detail);
 
       if (!date || !Number.isFinite(value)) {
@@ -356,7 +436,7 @@ export function createPortfolioHeatmap(items, options = {}) {
         entries[0].date,
       )
     : today;
-  const endDate = latestDate.getTime() > today.getTime() ? latestDate : today;
+  const endDate = entries.length ? latestDate : today;
   const totalDays = weeks * 7;
   const gridEnd = addDays(startOfWeek(endDate, 1), 6);
   const gridStart = addDays(gridEnd, -(totalDays - 1));

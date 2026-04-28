@@ -952,6 +952,14 @@ function resolveSector(item, reference, assetClass) {
     return { value: '배당 ETF', source: 'derived' };
   }
 
+  if (assetClass?.includes('ETF')) {
+    return { value: '혼합/분산', source: 'generic' };
+  }
+
+  if (item.code || item.ticker || item.name || item.label) {
+    return { value: '기타', source: 'generic' };
+  }
+
   return { value: '', source: 'raw' };
 }
 
@@ -991,6 +999,14 @@ function resolveStyle(item, reference, assetClass, sector) {
     return { value: '분산형', source: 'derived' };
   }
 
+  if (assetClass?.includes('ETF')) {
+    return { value: '분산형', source: 'generic' };
+  }
+
+  if (assetClass || item.code || item.ticker || item.name || item.label) {
+    return { value: '혼합형', source: 'generic' };
+  }
+
   return { value: '', source: 'raw' };
 }
 
@@ -1025,6 +1041,10 @@ function resolveRisk(item, reference, assetClass, style, sector) {
 
   if (/광범위시장|국제주식|신흥국주식|전세계주식/.test(derivedText)) {
     return { value: '중위험', source: 'derived' };
+  }
+
+  if (assetClass || item.code || item.ticker || item.name || item.label) {
+    return { value: '중위험', source: 'generic' };
   }
 
   return { value: '', source: 'raw' };
@@ -1090,10 +1110,12 @@ function findSecurityNameFieldValue(fields) {
 
 const WIKIDATA_ACTION_API_URL = 'https://www.wikidata.org/w/api.php';
 const WIKIDATA_SPARQL_URL = 'https://query.wikidata.org/sparql';
+const YAHOO_FINANCE_SEARCH_URL = 'https://query1.finance.yahoo.com/v1/finance/search';
 const LIVE_KNOWLEDGE_CACHE = new Map();
 const WIKIDATA_SEARCH_CACHE = new Map();
 const WIKIDATA_TICKER_CACHE = new Map();
 const WIKIDATA_ENTITY_CACHE = new Map();
+const YAHOO_FINANCE_SEARCH_CACHE = new Map();
 const LIVE_KNOWLEDGE_TIMEOUT_MS = 4200;
 const LIVE_KNOWLEDGE_CONCURRENCY = 4;
 const STABLE_ENRICHED_FIELD_LABELS = new Set([
@@ -1122,7 +1144,9 @@ export function buildKnowledgeLookupKey(item) {
 }
 
 function isStrongMetadataSource(source) {
-  return ['provided', 'reference', 'wikidata'].includes(String(source ?? '').trim().toLowerCase());
+  return ['provided', 'reference', 'wikidata', 'yahoo'].includes(
+    String(source ?? '').trim().toLowerCase(),
+  );
 }
 
 function needsLiveKnowledge(item) {
@@ -1243,10 +1267,11 @@ async function searchWikidataByTicker(ticker) {
       },
     });
     const itemId = parseEntityIdFromUri(response?.results?.bindings?.[0]?.item?.value);
-    WIKIDATA_TICKER_CACHE.set(cacheKey, itemId);
+    if (itemId) {
+      WIKIDATA_TICKER_CACHE.set(cacheKey, itemId);
+    }
     return itemId;
   } catch {
-    WIKIDATA_TICKER_CACHE.set(cacheKey, '');
     return '';
   }
 }
@@ -1310,10 +1335,11 @@ async function searchWikidataByName(query, identifiers) {
       .sort((left, right) => scoreWikidataSearchHit(right, identifiers) - scoreWikidataSearchHit(left, identifiers))
       .find((candidate) => scoreWikidataSearchHit(candidate, identifiers) > 0.5);
     const itemId = best?.id ?? '';
-    WIKIDATA_SEARCH_CACHE.set(cacheKey, itemId);
+    if (itemId) {
+      WIKIDATA_SEARCH_CACHE.set(cacheKey, itemId);
+    }
     return itemId;
   } catch {
-    WIKIDATA_SEARCH_CACHE.set(cacheKey, '');
     return '';
   }
 }
@@ -1377,7 +1403,6 @@ async function getWikidataEntitySnapshot(entityId) {
     const response = await fetchJsonWithTimeout(url.toString());
     const entity = response?.entities?.[entityId];
     if (!entity) {
-      WIKIDATA_ENTITY_CACHE.set(entityId, null);
       return null;
     }
 
@@ -1406,13 +1431,12 @@ async function getWikidataEntitySnapshot(entityId) {
     WIKIDATA_ENTITY_CACHE.set(entityId, snapshot);
     return snapshot;
   } catch {
-    WIKIDATA_ENTITY_CACHE.set(entityId, null);
     return null;
   }
 }
 
-async function findWikidataEntityId(item) {
-  const identifiers = [
+function collectSecurityIdentifiers(item) {
+  return [
     item.code,
     item.ticker,
     item.name,
@@ -1422,6 +1446,257 @@ async function findWikidataEntityId(item) {
   ]
     .map((value) => String(value ?? '').trim())
     .filter(Boolean);
+}
+
+function collectYahooFinanceIdentifiers(item) {
+  return [
+    item.code,
+    item.ticker,
+    item.name,
+    item.companyName,
+    item.label,
+    findSecurityNameFieldValue(item.fields),
+  ]
+    .map((value) => String(value ?? '').trim())
+    .filter(Boolean);
+}
+
+function buildYahooSearchCandidates(item) {
+  const identifiers = collectYahooFinanceIdentifiers(item);
+  const candidates = [];
+
+  identifiers.forEach((identifier) => {
+    candidates.push(identifier);
+
+    if (/^\d{6}$/.test(identifier)) {
+      candidates.push(`${identifier}.KS`, `${identifier}.KQ`);
+    }
+  });
+
+  return [
+    ...new Set(
+      candidates
+        .map((candidate) => String(candidate ?? '').trim())
+        .filter((candidate) => candidate.length >= 2 && !NON_SECURITY_DISPLAY_LABELS.has(normalizeSecurityKey(candidate))),
+    ),
+  ].slice(0, 6);
+}
+
+function normalizeYahooSymbol(value) {
+  return normalizeSecurityKey(String(value ?? '').replace(/\.(KS|KQ|TO|V|T|HK|SS|SZ)$/i, ''));
+}
+
+function scoreYahooFinanceQuote(quote, identifiers) {
+  const symbol = normalizeSecurityKey(quote?.symbol);
+  const baseSymbol = normalizeYahooSymbol(quote?.symbol);
+  const longName = normalizeSecurityKey(quote?.longname ?? quote?.longName);
+  const shortName = normalizeSecurityKey(quote?.shortname ?? quote?.shortName);
+  const quoteType = normalizeSecurityKey(quote?.quoteType);
+  const typeDisplay = normalizeSecurityKey(quote?.typeDisp);
+  let score = Number(quote?.score ?? 0) / 100000;
+
+  identifiers.forEach((identifier) => {
+    if (identifier === symbol || identifier === baseSymbol) {
+      score += 6;
+      return;
+    }
+
+    if (
+      (longName && (longName.includes(identifier) || identifier.includes(longName))) ||
+      (shortName && (shortName.includes(identifier) || identifier.includes(shortName)))
+    ) {
+      score += 3;
+    }
+  });
+
+  if (/equity|etf|fund|index/.test(`${quoteType}${typeDisplay}`)) {
+    score += 1.2;
+  }
+
+  if (/currency|future|option|crypto/.test(`${quoteType}${typeDisplay}`)) {
+    score -= 3;
+  }
+
+  return score;
+}
+
+function buildYahooFinanceSnapshot(quote) {
+  if (!quote?.symbol) {
+    return null;
+  }
+
+  return {
+    symbol: String(quote.symbol ?? '').trim(),
+    companyName: String(
+      quote.longname ?? quote.longName ?? quote.shortname ?? quote.shortName ?? quote.symbol ?? '',
+    ).trim(),
+    exchange: String(quote.exchDisp ?? quote.exchange ?? quote.market ?? '').trim(),
+    quoteType: String(quote.quoteType ?? quote.typeDisp ?? '').trim(),
+    securityType: String(quote.typeDisp ?? quote.quoteType ?? '').trim(),
+    sector: String(quote.sectorDisp ?? quote.sector ?? quote.industryDisp ?? quote.industry ?? '').trim(),
+    industry: String(quote.industryDisp ?? quote.industry ?? '').trim(),
+  };
+}
+
+async function searchYahooFinance(item) {
+  const candidates = buildYahooSearchCandidates(item);
+  if (!candidates.length) {
+    return null;
+  }
+
+  const normalizedIdentifiers = collectYahooFinanceIdentifiers(item)
+    .map((value) => normalizeYahooSymbol(value))
+    .filter(Boolean);
+
+  for (const candidate of candidates) {
+    const cacheKey = normalizeSecurityKey(candidate);
+    if (YAHOO_FINANCE_SEARCH_CACHE.has(cacheKey)) {
+      return YAHOO_FINANCE_SEARCH_CACHE.get(cacheKey);
+    }
+
+    const url = new URL(YAHOO_FINANCE_SEARCH_URL);
+    url.search = new URLSearchParams({
+      q: candidate,
+      quotesCount: '8',
+      newsCount: '0',
+      enableFuzzyQuery: 'true',
+    }).toString();
+
+    try {
+      const response = await fetchJsonWithTimeout(url.toString(), {}, 3200);
+      const bestQuote = [...(response?.quotes ?? [])]
+        .filter((quote) => quote?.symbol)
+        .sort(
+          (left, right) =>
+            scoreYahooFinanceQuote(right, normalizedIdentifiers) -
+            scoreYahooFinanceQuote(left, normalizedIdentifiers),
+        )
+        .find((quote) => scoreYahooFinanceQuote(quote, normalizedIdentifiers) > 1.2);
+      const snapshot = buildYahooFinanceSnapshot(bestQuote);
+
+      if (snapshot?.companyName) {
+        YAHOO_FINANCE_SEARCH_CACHE.set(cacheKey, snapshot);
+        return snapshot;
+      }
+    } catch {
+      // Live enrichment is opportunistic. Keep local metadata and let scheduled retries try again.
+    }
+  }
+
+  return null;
+}
+
+function resolveYahooRegion(snapshot, signalItem) {
+  const exchange = normalizeSecurityKey(
+    [snapshot?.exchange, snapshot?.symbol].filter(Boolean).join(' '),
+  );
+
+  if (/nyse|nasdaq|nas|nms|nys|amex|americanstockexchange|pcx|bats|us/.test(exchange)) {
+    return '미국';
+  }
+
+  if (/kospi|kosdaq|krx|ks|kq|korea|seoul/.test(exchange)) {
+    return '한국';
+  }
+
+  if (/tokyo|jpx|tse|japan/.test(exchange)) {
+    return '일본';
+  }
+
+  if (/hongkong|hkg|hkex|hk/.test(exchange)) {
+    return '홍콩';
+  }
+
+  if (/shanghai|shenzhen|china|ss|sz/.test(exchange)) {
+    return '중국';
+  }
+
+  if (/london|lse|uk|unitedkingdom/.test(exchange)) {
+    return '영국';
+  }
+
+  if (/toronto|tsx|canada|to|vancouver/.test(exchange)) {
+    return '캐나다';
+  }
+
+  if (/australia|asx/.test(exchange)) {
+    return '호주';
+  }
+
+  return resolveRegion(signalItem, null).value;
+}
+
+function resolveYahooAssetClass(snapshot, signalItem) {
+  const quoteType = normalizeSecurityKey(snapshot?.quoteType ?? snapshot?.securityType);
+
+  if (/etf/.test(quoteType)) {
+    return '주식 ETF';
+  }
+
+  if (/mutualfund|fund/.test(quoteType)) {
+    return '펀드';
+  }
+
+  if (/index/.test(quoteType)) {
+    return '지수';
+  }
+
+  if (/equity|stock/.test(quoteType)) {
+    return '개별주식';
+  }
+
+  return resolveAssetClass(signalItem, null).value;
+}
+
+function buildYahooLiveKnowledge(item, snapshot) {
+  if (!snapshot?.companyName) {
+    return null;
+  }
+
+  const signalText = [
+    item.label,
+    item.name,
+    item.code,
+    snapshot.symbol,
+    snapshot.companyName,
+    snapshot.exchange,
+    snapshot.quoteType,
+    snapshot.securityType,
+    snapshot.sector,
+    snapshot.industry,
+  ]
+    .filter(Boolean)
+    .join(' ');
+  const signalItem = {
+    ...item,
+    label: signalText,
+    name: snapshot.companyName,
+    companyName: snapshot.companyName,
+    sector: snapshot.sector || item.sector,
+  };
+  const region = resolveYahooRegion(snapshot, signalItem);
+  const assetClass = resolveYahooAssetClass(snapshot, signalItem);
+  const sector = snapshot.sector || resolveSector(signalItem, null, assetClass).value;
+  const style = resolveStyle(signalItem, null, assetClass, sector).value;
+  const risk = resolveRisk(signalItem, null, assetClass, style, sector).value;
+  const description = [snapshot.sector, snapshot.industry].filter(Boolean).join(' · ');
+
+  return {
+    companyName: snapshot.companyName,
+    description,
+    exchange: snapshot.exchange,
+    securityType: snapshot.securityType,
+    region,
+    sector,
+    style,
+    risk,
+    assetClass,
+    source: 'yahoo',
+  };
+}
+
+async function findWikidataEntityId(item) {
+  const identifiers = collectSecurityIdentifiers(item);
   const normalizedIdentifiers = identifiers.map((value) => normalizeSecurityKey(value)).filter(Boolean);
   const tickerCandidates = [
     ...new Set(
@@ -1534,16 +1809,18 @@ function mergeLiveKnowledge(item, liveKnowledge) {
     return item;
   }
 
+  const liveSource =
+    String(liveKnowledge.source ?? '').trim().toLowerCase() === 'yahoo' ? 'yahoo' : 'wikidata';
   const currentSources = item.metadataSourceByField ?? {};
-  const regionMeta = chooseKnowledgeValue(item.region, currentSources.region, liveKnowledge.region, 'wikidata');
-  const sectorMeta = chooseKnowledgeValue(item.sector, currentSources.sector, liveKnowledge.sector, 'wikidata');
-  const styleMeta = chooseKnowledgeValue(item.style, currentSources.style, liveKnowledge.style, 'wikidata');
-  const riskMeta = chooseKnowledgeValue(item.risk, currentSources.risk, liveKnowledge.risk, 'wikidata');
+  const regionMeta = chooseKnowledgeValue(item.region, currentSources.region, liveKnowledge.region, liveSource);
+  const sectorMeta = chooseKnowledgeValue(item.sector, currentSources.sector, liveKnowledge.sector, liveSource);
+  const styleMeta = chooseKnowledgeValue(item.style, currentSources.style, liveKnowledge.style, liveSource);
+  const riskMeta = chooseKnowledgeValue(item.risk, currentSources.risk, liveKnowledge.risk, liveSource);
   const assetClassMeta = chooseKnowledgeValue(
     item.assetClass,
     currentSources.assetClass,
     liveKnowledge.assetClass,
-    'wikidata',
+    liveSource,
   );
   const shouldReplaceName =
     !String(item.name ?? '').trim() ||
@@ -1598,7 +1875,7 @@ function mergeLiveKnowledge(item, liveKnowledge) {
     style: styleMeta.value,
     risk: riskMeta.value,
     assetClass: assetClassMeta.value,
-    metadataSource: 'wikidata',
+    metadataSource: liveSource,
     metadataSourceByField: {
       ...currentSources,
       region: regionMeta.source,
@@ -1672,7 +1949,9 @@ function mergeResolvedKnowledgeItem(baseItem, resolvedItem) {
   };
 }
 
-async function enrichPortfolioItemWithLiveKnowledge(item) {
+async function enrichPortfolioItemWithLiveKnowledge(item, options = {}) {
+  const { force = false } = options;
+
   if (typeof fetch !== 'function' || !needsLiveKnowledge(item)) {
     return item;
   }
@@ -1682,28 +1961,35 @@ async function enrichPortfolioItemWithLiveKnowledge(item) {
     return item;
   }
 
-  if (LIVE_KNOWLEDGE_CACHE.has(cacheKey)) {
+  if (LIVE_KNOWLEDGE_CACHE.has(cacheKey) && !force) {
     return mergeLiveKnowledge(item, LIVE_KNOWLEDGE_CACHE.get(cacheKey));
   }
 
   try {
+    let liveKnowledge = null;
     const entityId = await findWikidataEntityId(item);
-    if (!entityId) {
-      LIVE_KNOWLEDGE_CACHE.set(cacheKey, null);
+
+    if (entityId) {
+      const snapshot = await getWikidataEntitySnapshot(entityId);
+      liveKnowledge = buildLiveKnowledge(item, snapshot);
+    }
+
+    if (!liveKnowledge) {
+      liveKnowledge = buildYahooLiveKnowledge(item, await searchYahooFinance(item));
+    }
+
+    if (!liveKnowledge) {
       return item;
     }
 
-    const snapshot = await getWikidataEntitySnapshot(entityId);
-    const liveKnowledge = buildLiveKnowledge(item, snapshot);
     LIVE_KNOWLEDGE_CACHE.set(cacheKey, liveKnowledge);
     return mergeLiveKnowledge(item, liveKnowledge);
   } catch {
-    LIVE_KNOWLEDGE_CACHE.set(cacheKey, null);
     return item;
   }
 }
 
-export async function enrichPortfolioItemsWithLiveKnowledge(items) {
+export async function enrichPortfolioItemsWithLiveKnowledge(items, options = {}) {
   if (!Array.isArray(items) || !items.length) {
     return items;
   }
@@ -1724,7 +2010,7 @@ export async function enrichPortfolioItemsWithLiveKnowledge(items) {
         }
 
         const [key, item] = next;
-        resolved.set(key, await enrichPortfolioItemWithLiveKnowledge(item));
+        resolved.set(key, await enrichPortfolioItemWithLiveKnowledge(item, options));
       }
     },
   );

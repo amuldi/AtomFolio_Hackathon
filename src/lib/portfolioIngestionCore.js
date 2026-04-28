@@ -166,7 +166,47 @@ function resolveFieldLabelKey(label) {
     return 'accountType';
   }
 
-  if (['매수일', '매입일', '취득일', 'buydate', 'purchasedate'].map(normalizeDisplayKey).includes(normalized)) {
+  if (
+    [
+      '날짜',
+      '일자',
+      '기준일',
+      '기준일자',
+      '거래일',
+      '거래일자',
+      '거래일시',
+      '매매일',
+      '매매일자',
+      '체결일',
+      '체결일시',
+      '평가일',
+      '조회일',
+      '조회일자',
+      '매수일',
+      '매입일',
+      '취득일',
+      'date',
+      'day',
+      'datetime',
+      'timestamp',
+      'tradedate',
+      'tradingdate',
+      'executiondate',
+      'settlementdate',
+      'orderdate',
+      'recorddate',
+      'valuedate',
+      'valuationdate',
+      'snapshotdate',
+      'asofdate',
+      'buydate',
+      'purchasedate',
+      'entrydate',
+      'acquisitiondate',
+    ]
+      .map(normalizeDisplayKey)
+      .includes(normalized)
+  ) {
     return 'buyDate';
   }
 
@@ -178,7 +218,37 @@ function resolveFieldLabelKey(label) {
     return 'shares';
   }
 
-  if (['수익률', '등락률', 'return', 'returns', 'performance', 'change'].map(normalizeDisplayKey).includes(normalized)) {
+  if (
+    [
+      '수익률',
+      '수익율',
+      '등락률',
+      '변동률',
+      '손익률',
+      '손익율',
+      '평가손익률',
+      '일별수익률',
+      '일일수익률',
+      '일간수익률',
+      '누적수익률',
+      '총수익률',
+      'return',
+      'returns',
+      'returnpct',
+      'returnrate',
+      'rateofreturn',
+      'dailyreturn',
+      'cumulativereturn',
+      'totalreturn',
+      'profitrate',
+      'dailypnlrate',
+      'performance',
+      'change',
+      'yield',
+    ]
+      .map(normalizeDisplayKey)
+      .includes(normalized)
+  ) {
     return 'return';
   }
 
@@ -374,41 +444,101 @@ function distinctValueCount(values, normalize = normalizeDisplayKey) {
   return new Set(values.map((value) => normalize(value)).filter(Boolean)).size;
 }
 
-function formatAtomDateLabel(value) {
+function createStrictDateParts(yearValue, monthValue, dayValue) {
+  const year = Number.parseInt(String(yearValue), 10);
+  const month = Number.parseInt(String(monthValue), 10);
+  const day = Number.parseInt(String(dayValue), 10);
+
+  if (!Number.isInteger(year) || !Number.isInteger(month) || !Number.isInteger(day)) {
+    return null;
+  }
+
+  if (year < 1900 || year > 2100 || month < 1 || month > 12 || day < 1 || day > 31) {
+    return null;
+  }
+
+  const date = new Date(year, month - 1, day);
+  if (
+    date.getFullYear() !== year ||
+    date.getMonth() !== month - 1 ||
+    date.getDate() !== day
+  ) {
+    return null;
+  }
+
+  return { year, month, day };
+}
+
+function formatDateParts(parts) {
+  return `${parts.year}-${String(parts.month).padStart(2, '0')}-${String(parts.day).padStart(2, '0')}`;
+}
+
+function parseDateParts(value, options = {}) {
   const trimmed = String(value ?? '').trim();
   if (!trimmed) {
-    return '';
+    return null;
   }
 
-  const normalized = trimmed.replace(/\s+/, ' ');
+  const normalized = trimmed
+    .replace(/^\ufeff/, '')
+    .replace(/\s+/g, ' ')
+    .replace(/[.]\s*$/g, '')
+    .trim();
+  const localizedDateMatch = normalized.match(
+    /^(\d{4})\s*년\s*(\d{1,2})\s*월\s*(\d{1,2})\s*일?/,
+  );
+  if (localizedDateMatch) {
+    return createStrictDateParts(localizedDateMatch[1], localizedDateMatch[2], localizedDateMatch[3]);
+  }
+
+  const compactMatch = normalized.match(/^(\d{4})(\d{2})(\d{2})$/);
+  if (compactMatch) {
+    const compactDate = createStrictDateParts(compactMatch[1], compactMatch[2], compactMatch[3]);
+    if (compactDate) {
+      return compactDate;
+    }
+  }
+
+  if (options.allowExcelSerial && /^\d{5}(?:\.0+)?$/.test(normalized)) {
+    const serial = Number.parseInt(normalized, 10);
+    if (serial >= 25569 && serial <= 73050) {
+      const excelEpoch = Date.UTC(1899, 11, 30);
+      const date = new Date(excelEpoch + serial * 86400000);
+      return createStrictDateParts(date.getUTCFullYear(), date.getUTCMonth() + 1, date.getUTCDate());
+    }
+  }
+
   const isoDateTimeMatch = normalized.match(
-    /^(\d{4})[-/\.](\d{1,2})[-/\.](\d{1,2})(?:[T\s]\d{1,2}:\d{2}(?::\d{2})?)?/,
+    /^(\d{4})[-/\.](\d{1,2})[-/\.](\d{1,2})(?:[T\s]+(?:오전|오후|AM|PM)?\s*\d{1,2}:\d{2}(?::\d{2})?)?/i,
   );
   if (isoDateTimeMatch) {
-    const [, year, month, day] = isoDateTimeMatch;
-    return `${year}-${month.padStart(2, '0')}-${day.padStart(2, '0')}`;
+    return createStrictDateParts(isoDateTimeMatch[1], isoDateTimeMatch[2], isoDateTimeMatch[3]);
   }
 
-  const isoDateMatch = trimmed.match(/^(\d{4})[-/\.](\d{1,2})[-/\.](\d{1,2})/);
-  if (isoDateMatch) {
-    const [, year, month, day] = isoDateMatch;
-    return `${year}-${month.padStart(2, '0')}-${day.padStart(2, '0')}`;
-  }
-
-  const compactMatch = trimmed.match(/^(\d{4})(\d{2})(\d{2})$/);
-  if (compactMatch) {
-    const [, year, month, day] = compactMatch;
-    return `${year}-${month}-${day}`;
-  }
-
-  const shortDateMatch = trimmed.match(/^(\d{1,2})[-/\.](\d{1,2})[-/\.](\d{2,4})(?:[T\s]\d{1,2}:\d{2}(?::\d{2})?)?/);
+  const shortDateMatch = normalized.match(
+    /^(\d{1,2})[-/\.](\d{1,2})[-/\.](\d{2,4})(?:[T\s]+(?:오전|오후|AM|PM)?\s*\d{1,2}:\d{2}(?::\d{2})?)?/i,
+  );
   if (shortDateMatch) {
-    const [, month, day, year] = shortDateMatch;
-    const fullYear = year.length === 2 ? `20${year}` : year;
-    return `${fullYear}-${month.padStart(2, '0')}-${day.padStart(2, '0')}`;
+    const [, first, second, rawYear] = shortDateMatch;
+    const year = rawYear.length === 2 ? `20${rawYear}` : rawYear;
+    const firstNumber = Number.parseInt(first, 10);
+    const secondNumber = Number.parseInt(second, 10);
+    const dayFirst = firstNumber > 12 && secondNumber <= 12;
+    return dayFirst
+      ? createStrictDateParts(year, second, first)
+      : createStrictDateParts(year, first, second);
   }
 
-  return trimmed;
+  return null;
+}
+
+function formatAtomDateLabel(value) {
+  const parsed = parseDateParts(value, { allowExcelSerial: true });
+  if (parsed) {
+    return formatDateParts(parsed);
+  }
+
+  return String(value ?? '').trim();
 }
 
 function isTickerLikeValue(value) {
@@ -429,28 +559,7 @@ function isTickerLikeValue(value) {
 }
 
 function isDateLikeValue(value) {
-  const trimmed = String(value ?? '').trim();
-  if (!trimmed) {
-    return false;
-  }
-
-  if (/^\d{8}$/.test(trimmed)) {
-    const year = Number.parseInt(trimmed.slice(0, 4), 10);
-    const month = Number.parseInt(trimmed.slice(4, 6), 10) - 1;
-    const day = Number.parseInt(trimmed.slice(6, 8), 10);
-    const date = new Date(year, month, day);
-    return Number.isFinite(date.getTime());
-  }
-
-  if (
-    /^\d{4}[-/\.]\d{1,2}[-/\.]\d{1,2}(?:[T\s]\d{1,2}:\d{2}(?::\d{2})?)?$/.test(trimmed) ||
-    /^\d{1,2}[-/\.]\d{1,2}[-/\.]\d{2,4}(?:[T\s]\d{1,2}:\d{2}(?::\d{2})?)?$/.test(trimmed)
-  ) {
-    const date = new Date(trimmed.replace(/\./g, '-').replace(/^(\d{4}-\d{1,2}-\d{1,2})\s+/, '$1T'));
-    return Number.isFinite(date.getTime());
-  }
-
-  return false;
+  return Boolean(parseDateParts(value));
 }
 
 function isNumericLikeValue(value) {
@@ -616,7 +725,7 @@ function inferHeaderLabels(headerLabels, bodyRows) {
   const candidateDefinitions = [
     { key: 'stockCode', label: '종목코드', minScore: 0.72, score: (values) => matchRatio(values, isTickerLikeValue) },
     { key: 'accountType', label: '계좌유형', minScore: 0.74, score: (values) => matchRatio(values, isAccountTypeValue) },
-    { key: 'buyDate', label: '매수일', minScore: 0.84, score: (values) => matchRatio(values, isDateLikeValue) },
+    { key: 'buyDate', label: '날짜', minScore: 0.8, score: (values) => matchRatio(values, isDateLikeValue) },
     { key: 'buyPrice', label: '매수가', minScore: 0.76, score: (values) => matchRatio(values, isPriceLikeValue) },
     { key: 'shares', label: '보유수량', minScore: 0.78, score: (values) => matchRatio(values, isShareLikeValue) },
     {
@@ -626,8 +735,12 @@ function inferHeaderLabels(headerLabels, bodyRows) {
       score: (values) =>
         matchRatio(values, (value) => {
           const trimmed = String(value ?? '').trim();
-          const parsed = Number.parseFloat(trimmed.replace(/[,%\s]/g, ''));
-          return Number.isFinite(parsed) && (trimmed.includes('%') || /^[+-]/.test(trimmed) || Math.abs(parsed) <= 100);
+          const parsed = Number.parseFloat(trimmed.replace(/[^0-9.+-]/g, ''));
+          return (
+            Number.isFinite(parsed) &&
+            !isDateLikeValue(trimmed) &&
+            (trimmed.includes('%') || /^[+-]/.test(trimmed) || Math.abs(parsed) <= 100)
+          );
         }),
     },
   ];
@@ -908,9 +1021,12 @@ function selectPortfolioLabelStrategy({ bodyRows, headers, fieldKeys, dateIndex,
   const securityDistinctCount = securityValues.length ? distinctValueCount(securityValues) : Number.POSITIVE_INFINITY;
   const hasDailySeriesHeaders = headers.some(
     (header) =>
+      header.includes('일별수익률') ||
+      header.includes('일간수익률') ||
       header.includes('일일수익률') ||
       header.includes('누적수익률') ||
       header.includes('dailyreturn') ||
+      header.includes('dailypnlrate') ||
       header.includes('cumulativereturn'),
   );
   const hasTimeSeriesMetricHeaders = headers.some(
@@ -925,6 +1041,9 @@ function selectPortfolioLabelStrategy({ bodyRows, headers, fieldKeys, dateIndex,
     fieldKeys[dateIndex] === 'buyDate' ||
     headers[dateIndex]?.includes('날짜') ||
     headers[dateIndex]?.includes('일자') ||
+    headers[dateIndex]?.includes('거래일') ||
+    headers[dateIndex]?.includes('매매일') ||
+    headers[dateIndex]?.includes('체결일') ||
     headers[dateIndex]?.includes('date');
 
   if (
@@ -945,15 +1064,22 @@ function formatReturnDetail(value, label = '') {
     return '';
   }
 
-  const numeric = Number.parseFloat(trimmed.replace(/[,%\s]/g, ''));
+  const normalized = trimmed.replace(/[−–—]/g, '-');
+  const numeric = Number.parseFloat(normalized.replace(/[^0-9.+-]/g, ''));
   if (!Number.isFinite(numeric)) {
     return '';
   }
+  const signedNumeric =
+    (/^\(.*\)$/.test(normalized) || /(?:손실|loss|▼|↓)/i.test(normalized)) && numeric > 0
+      ? -numeric
+      : numeric;
 
   const explicitPercent =
-    /%|pct|percent|return|yield|change|rate|수익률|등락률|변동률|손익률/i.test(String(label ?? '').trim());
+    /%|pct|percent|return|yield|change|rate|수익률|수익율|등락률|변동률|손익률|손익율|평가손익률/i.test(String(label ?? '').trim());
   const percentValue =
-    explicitPercent || trimmed.includes('%') || Math.abs(numeric) > 1 ? numeric : numeric * 100;
+    explicitPercent || normalized.includes('%') || Math.abs(signedNumeric) > 1
+      ? signedNumeric
+      : signedNumeric * 100;
   const fixed = percentValue
     .toFixed(Math.abs(percentValue) >= 10 ? 1 : 2)
     .replace(/(\.\d*?[1-9])0+$/, '$1')
@@ -982,7 +1108,7 @@ function extractPortfolioItemDateValue(item) {
     item,
     (label, key) =>
       key === 'buyDate' ||
-      /(날짜|일자|date|day|tradedate|recorddate|valuedate|valuationdate|snapshotdate)/i.test(label),
+      /(날짜|일자|기준일|거래일|매매일|체결일|평가일|조회일|date|day|datetime|timestamp|tradedate|tradingdate|executiondate|recorddate|valuedate|valuationdate|snapshotdate)/i.test(label),
   );
 }
 
@@ -1183,10 +1309,66 @@ function inspectPortfolioTable(text) {
     headers,
     hasDetectedHeader,
     indexes: {
-      dateIndex: pickResolvedFieldIndex(fieldKeys, headers, 'buyDate', ['date', 'day', '날짜', '일자', 'recorddate', 'valuedate', 'tradedate']),
+      dateIndex: pickResolvedFieldIndex(fieldKeys, headers, 'buyDate', [
+        'date',
+        'day',
+        'datetime',
+        'timestamp',
+        'recorddate',
+        'valuedate',
+        'valuationdate',
+        'tradedate',
+        'tradingdate',
+        'executiondate',
+        'settlementdate',
+        'orderdate',
+        'snapshotdate',
+        'asofdate',
+        '날짜',
+        '일자',
+        '기준일',
+        '기준일자',
+        '거래일',
+        '거래일자',
+        '거래일시',
+        '매매일',
+        '매매일자',
+        '체결일',
+        '체결일시',
+        '평가일',
+        '조회일',
+        '조회일자',
+      ]),
       tickerIndex: pickResolvedFieldIndex(fieldKeys, headers, 'stockCode', ['ticker', 'symbol', 'stockcode', 'securitycode', '종목코드']),
       nameIndex: findBestSecurityNameColumnIndex(headerLabels, fieldKeys, bodyRows),
-      returnIndex: pickResolvedFieldIndex(fieldKeys, headers, 'return', ['return', 'returns', 'returnrate', 'rateofreturn', 'profitrate', 'performance', 'change', 'yield', 'gain', '수익률', '등락률', '변동률', '손익률']),
+      returnIndex: pickResolvedFieldIndex(fieldKeys, headers, 'return', [
+        'return',
+        'returns',
+        'returnpct',
+        'returnrate',
+        'rateofreturn',
+        'dailyreturn',
+        'cumulativereturn',
+        'totalreturn',
+        'profitrate',
+        'dailypnlrate',
+        'performance',
+        'change',
+        'yield',
+        'gain',
+        '수익률',
+        '수익율',
+        '등락률',
+        '변동률',
+        '손익률',
+        '손익율',
+        '평가손익률',
+        '일별수익률',
+        '일일수익률',
+        '일간수익률',
+        '누적수익률',
+        '총수익률',
+      ]),
       regionIndex: pickResolvedFieldIndex(fieldKeys, headers, 'region', ['region', 'geography', 'market', 'country', 'locale', 'area', '투자지역', '지역', '국가']),
       sectorIndex: pickResolvedFieldIndex(fieldKeys, headers, 'sector', ['sector', 'industry', 'theme', '업종', '산업', '섹터', '분야']),
       styleIndex: pickResolvedFieldIndex(fieldKeys, headers, 'style', ['style', 'factor', 'strategy', 'investmentstyle', '스타일', '전략', '투자스타일', '팩터']),
@@ -1306,7 +1488,11 @@ function scoreDateColumn(headerLabel, fieldKey, values) {
     score += 0.18;
   }
 
-  if (/(date|day|buydate|tradedate|recorddate|valuedate|날짜|일자|매수일)/.test(normalizedHeader)) {
+  if (
+    /(date|day|datetime|timestamp|buydate|tradedate|tradingdate|executiondate|recorddate|valuedate|valuationdate|snapshotdate|날짜|일자|기준일|거래일|매매일|체결일|평가일|조회일|매수일)/.test(
+      normalizedHeader,
+    )
+  ) {
     score += 0.22;
   }
 
@@ -1325,16 +1511,24 @@ function scoreReturnColumn(headerLabel, fieldKey, values) {
   const normalizedHeader = normalizeHeader(headerLabel);
   let score = matchRatio(values, (value) => {
     const trimmed = String(value ?? '').trim();
-    const parsed = Number.parseFloat(trimmed.replace(/[,%\s]/g, ''));
+    const parsed = Number.parseFloat(trimmed.replace(/[^0-9.+-]/g, ''));
 
-    return Number.isFinite(parsed) && (trimmed.includes('%') || /^[+-]/.test(trimmed) || Math.abs(parsed) <= 100);
+    return (
+      Number.isFinite(parsed) &&
+      !isDateLikeValue(trimmed) &&
+      (trimmed.includes('%') || /^[+-]/.test(trimmed) || Math.abs(parsed) <= 100)
+    );
   });
 
   if (fieldKey === 'return') {
     score += 0.16;
   }
 
-  if (/(return|returns|yield|performance|change|profitrate|수익률|등락률|변동률|손익률)/.test(normalizedHeader)) {
+  if (
+    /(return|returns|returnpct|yield|performance|change|profitrate|dailypnlrate|dailyreturn|cumulativereturn|totalreturn|수익률|수익율|등락률|변동률|손익률|손익율|평가손익률|일별수익률|일일수익률|일간수익률|누적수익률|총수익률)/.test(
+      normalizedHeader,
+    )
+  ) {
     score += 0.2;
   }
 

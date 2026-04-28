@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import * as THREE from 'three';
 import { createPortfolioHeatmap } from './lib/portfolioHeatmap.js';
 import { createPortfolioAllocation } from './lib/portfolioAllocation.js';
@@ -13,7 +13,7 @@ import { enrichPortfolioItem } from './lib/securityKnowledge.js';
 const VIEWBOX_SIZE = 640;
 const VIEWBOX_HALF = VIEWBOX_SIZE / 2;
 const MIN_ATOMS = 1;
-const MAX_PORTFOLIOS = 7;
+const MAX_PORTFOLIOS = 12;
 const BOND_LENGTH = 214;
 const CAMERA_DISTANCE = 470;
 const CAMERA_NEAR_CLIP = 136;
@@ -85,10 +85,26 @@ const REVIEW_TOOLTIP_VIEWPORT_INSET = 18;
 const REVIEW_TOOLTIP_VERTICAL_GAP = 10;
 const SHOOTING_STAR_INTERVAL_MS = 30000;
 const SHOOTING_STAR_CLEAR_BUFFER_MS = 420;
-const SCENE_FRAME_INTERVAL_MS = 1000 / 45;
-const LARGE_SCENE_FRAME_INTERVAL_MS = 1000 / 30;
+const SCENE_FRAME_INTERVAL_MS = 1000 / 30;
+const LARGE_SCENE_FRAME_INTERVAL_MS = 1000 / 24;
+const DRAG_SCENE_FRAME_INTERVAL_MS = 1000 / 60;
 const REDUCED_MOTION_FRAME_INTERVAL_MS = 1000 / 12;
-const LARGE_SCENE_ATOM_THRESHOLD = 18;
+const LARGE_SCENE_ATOM_THRESHOLD = 12;
+const DRAG_ROTATION_RESPONSE = 30;
+const IDLE_ROTATION_RESPONSE = 10;
+const DRAG_ROTATION_SENSITIVITY = 0.68;
+const DRAG_SPIN_DECAY = 7.4;
+const MAX_DRAG_SPIN_VELOCITY = 0.58;
+const SECURITY_ENRICHMENT_RETRY_DELAYS_MS = [0, 1500, 5000, 14000];
+const ACTIVE_FLOATING_TOOL_Z_INDEX = 80;
+const FLOATING_TOOL_Z_INDEX = {
+  settings: 30,
+  'tool-menu': 31,
+  group: 32,
+  heatmap: 33,
+  allocation: 34,
+  score: 35,
+};
 const UI_TEXT = {
   ko: {
     groupLabels: {
@@ -148,6 +164,7 @@ const UI_TEXT = {
     settingsResetLayoutAction: '현재 배치 다시 맞추기',
     uploadAria: '투자 데이터 업로드',
     uploadHint: '투자 데이터를 업로드 해주세요',
+    uploadDragHint: 'CSV 파일을 여기에 끌어다 놓으세요',
     reviewTitle: '업로드 진단',
     reviewStatusOk: '정상',
     reviewStatusNeedsReview: '검토 필요',
@@ -177,7 +194,7 @@ const UI_TEXT = {
     scorePointUnit: '점',
     parseError: '종목 행을 찾지 못했습니다. ticker/name 컬럼이 있는 CSV를 올려주세요.',
     readError: '파일을 읽지 못했습니다.',
-    maxFilesError: '포트폴리오는 최대 7개까지 업로드할 수 있습니다.',
+    maxFilesError: '포트폴리오는 최대 12개까지 업로드할 수 있습니다.',
   },
   en: {
     groupLabels: {
@@ -237,6 +254,7 @@ const UI_TEXT = {
     settingsResetLayoutAction: 'Realign current docks',
     uploadAria: 'Upload investment data',
     uploadHint: 'Please upload your investment data',
+    uploadDragHint: 'Drop CSV files here',
     reviewTitle: 'Upload Review',
     reviewStatusOk: 'OK',
     reviewStatusNeedsReview: 'Needs Review',
@@ -266,7 +284,7 @@ const UI_TEXT = {
     scorePointUnit: 'pts',
     parseError: 'Could not find portfolio rows. Upload a CSV with ticker or name columns.',
     readError: 'Could not read the file.',
-    maxFilesError: 'You can upload up to 7 portfolios.',
+    maxFilesError: 'You can upload up to 12 portfolios.',
   },
 };
 const TOOLTIP_WIDTH = 320;
@@ -617,6 +635,12 @@ function damp(current, target, lambda, delta) {
   return current + (target - current) * (1 - Math.exp(-lambda * delta));
 }
 
+function wait(ms) {
+  return new Promise((resolve) => {
+    window.setTimeout(resolve, ms);
+  });
+}
+
 function createPortfolioEntry(fileName, items, entryId) {
   const displayItems = collapsePortfolioItemsForDisplayShared(items);
 
@@ -725,7 +749,7 @@ function buildUploadReviewPreview(entry) {
   };
 }
 
-function supportsHoverReviewPreview() {
+function supportsHoverTooltip() {
   if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') {
     return false;
   }
@@ -741,9 +765,13 @@ function readPrefersReducedMotion() {
   return window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 }
 
-function sceneFrameIntervalFor(atomCount, reducedMotion) {
+function sceneFrameIntervalFor(atomCount, reducedMotion, isDragging = false) {
   if (reducedMotion) {
     return REDUCED_MOTION_FRAME_INTERVAL_MS;
+  }
+
+  if (isDragging) {
+    return DRAG_SCENE_FRAME_INTERVAL_MS;
   }
 
   return atomCount > LARGE_SCENE_ATOM_THRESHOLD
@@ -1205,6 +1233,28 @@ function compactLabel(value, max = 18) {
   }
 
   return value.length > max ? `${value.slice(0, max - 1)}…` : value;
+}
+
+function compactFileName(fileName, max = 18) {
+  const cleanName = String(fileName ?? '').trim();
+
+  if (!cleanName || cleanName.length <= max) {
+    return cleanName;
+  }
+
+  const extensionMatch = cleanName.match(/(\.[^.]{1,5})$/);
+  const extension = extensionMatch?.[1] ?? '';
+  const baseName = extension ? cleanName.slice(0, -extension.length) : cleanName;
+  const extensionBudget = extension ? extension.length : 0;
+  const availableBase = Math.max(6, max - extensionBudget - 1);
+  const frontLength = Math.max(4, Math.ceil(availableBase * 0.58));
+  const backLength = Math.max(3, availableBase - frontLength);
+
+  if (baseName.length <= frontLength + backLength + 1) {
+    return `${compactLabel(baseName, max - extensionBudget)}${extension}`;
+  }
+
+  return `${baseName.slice(0, frontLength)}…${baseName.slice(-backLength)}${extension}`;
 }
 
 function textFor(language) {
@@ -2643,10 +2693,50 @@ async function enrichSecurityItemsViaApi(items, options = {}) {
   return payload;
 }
 
+const STRONG_METADATA_SOURCES = new Set(['provided', 'reference', 'wikidata', 'yahoo']);
+
 function hasMissingCoreMetadata(item) {
-  return ['region', 'sector', 'style', 'risk'].some(
-    (field) => !String(item?.[field] ?? '').trim(),
-  );
+  return ['region', 'sector', 'style', 'risk'].some((field) => {
+    const value = String(item?.[field] ?? '').trim();
+    const source = String(
+      item?.metadataSourceByField?.[field] ?? item?.metadataSource ?? 'raw',
+    )
+      .trim()
+      .toLowerCase();
+
+    return !value || !STRONG_METADATA_SOURCES.has(source);
+  });
+}
+
+function metadataMergeKey(item) {
+  return [
+    item?.code,
+    item?.ticker,
+    item?.name,
+    item?.companyName,
+    item?.label,
+  ]
+    .map((value) => normalizeDisplayKey(value))
+    .find(Boolean) ?? '';
+}
+
+function mergeSecurityMetadataItems(baseItems, enrichedItems) {
+  if (!Array.isArray(baseItems) || !Array.isArray(enrichedItems) || !enrichedItems.length) {
+    return baseItems;
+  }
+
+  const enrichedByKey = new Map();
+  enrichedItems.forEach((item, index) => {
+    const key = metadataMergeKey(item) || `index:${index}`;
+    if (!enrichedByKey.has(key)) {
+      enrichedByKey.set(key, item);
+    }
+  });
+
+  return baseItems.map((item, index) => {
+    const key = metadataMergeKey(item) || `index:${index}`;
+    return enrichedByKey.get(key) ?? enrichedItems[index] ?? item;
+  });
 }
 
 function midpoint(a, b) {
@@ -3020,33 +3110,43 @@ const PORTFOLIO_PREVIEW_SLOTS = [
   { x: 0.18, y: 1.08, scale: 0.21, rotation: -15, z: -1600, blur: 1.34, opacity: 0.38, shadow: 10, delay: '-1.5s', duration: '6.7s' },
   { x: 1.08, y: 0.96, scale: 0.23, rotation: -19, z: -1460, blur: 1.1, opacity: 0.46, shadow: 12, delay: '-0.8s', duration: '6.9s' },
   { x: 0.86, y: 0.72, scale: 0.19, rotation: 9, z: -1700, blur: 1.52, opacity: 0.34, shadow: 9, delay: '-2.2s', duration: '7.1s' },
+  { x: 0.48, y: -0.12, scale: 0.18, rotation: -11, z: -1820, blur: 1.56, opacity: 0.32, shadow: 8, delay: '-3.4s', duration: '7.4s' },
+  { x: -0.18, y: 0.43, scale: 0.2, rotation: 25, z: -1520, blur: 1.18, opacity: 0.42, shadow: 11, delay: '-0.6s', duration: '6.8s' },
+  { x: 1.18, y: 0.48, scale: 0.18, rotation: -4, z: -1760, blur: 1.48, opacity: 0.34, shadow: 9, delay: '-2.7s', duration: '7.2s' },
+  { x: 0.58, y: 1.16, scale: 0.17, rotation: 21, z: -1880, blur: 1.62, opacity: 0.3, shadow: 8, delay: '-1.9s', duration: '7.6s' },
 ];
 
-function PortfolioPreviewAtom({ entry, slot }) {
-  const atoms = generateAtomLayout(entry.items).slice(0, 9);
-  const previewNodes = atoms.map((atom, index) => {
-    const direction = new THREE.Vector3(...atom.direction).normalize();
-    const radius = 34 + direction.z * 12 + noise(atom.seed + 71) * 9;
-    const x = direction.x * radius;
-    const y = direction.y * radius;
-    const depth = clamp((direction.z + 1) * 0.5, 0, 1);
-    const loopOuter = buildLoopPath(6.6 + depth * 2.5 + index * 0.12, atom.seed + 1100);
-    const loopMid = buildLoopPath(5.4 + depth * 1.9 + index * 0.1, atom.seed + 1146);
-    const loopInner = buildLoopPath(4.1 + depth * 1.5 + index * 0.08, atom.seed + 1180);
+const PREVIEW_ATOM_NODE_LIMIT = 6;
+
+const PortfolioPreviewAtom = memo(function PortfolioPreviewAtom({ entry, slot }) {
+  const previewNodes = useMemo(() => {
     const label = compactLabel(entry.fileName.replace(/\.[^.]+$/, ''), 16);
 
-    return {
-      id: atom.id,
-      x,
-      y,
-      depth,
-      seed: atom.seed,
-      outer: loopOuter,
-      mid: loopMid,
-      inner: loopInner,
-      label,
-    };
-  });
+    return generateAtomLayout(entry.items)
+      .slice(0, PREVIEW_ATOM_NODE_LIMIT)
+      .map((atom, index) => {
+        const direction = new THREE.Vector3(...atom.direction).normalize();
+        const radius = 34 + direction.z * 12 + noise(atom.seed + 71) * 9;
+        const x = direction.x * radius;
+        const y = direction.y * radius;
+        const depth = clamp((direction.z + 1) * 0.5, 0, 1);
+        const loopOuter = buildLoopPath(6.6 + depth * 2.5 + index * 0.12, atom.seed + 1100);
+        const loopMid = buildLoopPath(5.4 + depth * 1.9 + index * 0.1, atom.seed + 1146);
+        const loopInner = buildLoopPath(4.1 + depth * 1.5 + index * 0.08, atom.seed + 1180);
+
+        return {
+          id: atom.id,
+          x,
+          y,
+          depth,
+          seed: atom.seed,
+          outer: loopOuter,
+          mid: loopMid,
+          inner: loopInner,
+          label,
+        };
+      });
+  }, [entry.fileName, entry.items]);
 
   return (
     <div
@@ -3135,7 +3235,7 @@ function PortfolioPreviewAtom({ entry, slot }) {
       <span className="portfolio-preview__label">{previewNodes[0]?.label ?? entry.fileName}</span>
     </div>
   );
-}
+});
 
 const CENTER_BLOTS = [
   buildBlotPath(13.2, 501),
@@ -3395,6 +3495,7 @@ function FloatingGroupDock({
   spawn,
   resetSignal,
   visible = true,
+  layerStyle,
   onAnchorPositionChange,
   onChange,
   onInteract,
@@ -3714,6 +3815,7 @@ function FloatingGroupDock({
       className={`group-dock${panelSide === 'left' ? ' is-flipped' : ''}${expanded ? ' is-expanded' : ''}${dragging ? ' is-dragging' : ''}${visible ? '' : ' is-hidden'}`}
       style={{
         transform: `translate3d(${position.x}px, ${position.y}px, 0)`,
+        ...layerStyle,
       }}
     >
       <button
@@ -3751,6 +3853,13 @@ function HoverCard({ atom, position, language }) {
     return null;
   }
 
+  const returnRaw = atom.detail ?? '';
+  const returnIsPositive = returnRaw.startsWith('+');
+  const returnIsNegative = returnRaw.startsWith('-');
+  const displayFields = returnRaw
+    ? infoFields.filter((field) => resolveFieldLabelKey(field.label) !== 'return')
+    : infoFields;
+
   return (
     <aside
       className="hover-card"
@@ -3762,11 +3871,18 @@ function HoverCard({ atom, position, language }) {
       <div className="hover-card__header">
         <div className="hover-card__title-wrap">
           <strong className="hover-card__title">{atom.label}</strong>
+          {returnRaw ? (
+            <span
+              className={`hover-card__return${returnIsPositive ? ' is-positive' : returnIsNegative ? ' is-negative' : ''}`}
+            >
+              {returnRaw}
+            </span>
+          ) : null}
         </div>
       </div>
 
       <div className="hover-card__list">
-        {infoFields.map((field, index) => (
+        {displayFields.map((field, index) => (
           <div className="hover-card__row" key={`${atom.id}-${field.label}-${index}`}>
             <span className="hover-card__label">{formatFieldLabel(field.label, language)}</span>
             <span className="hover-card__value">{translateDisplayValue(field.value, language)}</span>
@@ -4555,6 +4671,7 @@ function PortfolioAllocationWidget({
   resetSignal,
   visible = true,
   settingsOpen = false,
+  layerStyle,
   onInteract,
 }) {
   const text = textFor(language);
@@ -4705,6 +4822,7 @@ function PortfolioAllocationWidget({
       className={`allocation-widget${panelSide === 'left' ? ' is-flipped' : ''}${open ? ' is-open' : ''}${allocationDock.dragging ? ' is-dragging' : ''}${visible ? '' : ' is-hidden'}`}
       style={{
         transform: `translate3d(${allocationDock.position.x}px, ${allocationDock.position.y}px, 0)`,
+        ...layerStyle,
       }}
     >
       <button
@@ -4802,6 +4920,7 @@ function FloatingHeatmapDock({
   visible = true,
   resetSignal,
   iconOnly = false,
+  layerStyle,
   onAnchorPositionChange,
   onInteract,
 }) {
@@ -5126,6 +5245,7 @@ function FloatingHeatmapDock({
       className={`heatmap-dock${panelSide === 'left' ? ' is-flipped' : ''}${expanded ? ' is-expanded' : ''}${dragging ? ' is-dragging' : ''}${visible ? '' : ' is-hidden'}`}
       style={{
         transform: `translate3d(${position.x}px, ${position.y}px, 0)`,
+        ...layerStyle,
       }}
     >
       <button
@@ -5157,6 +5277,7 @@ function FloatingToolTrigger({
   language,
   open,
   resetSignal,
+  layerStyle,
   onToggle,
   onResetAlignment,
   onPositionChange,
@@ -5421,6 +5542,7 @@ function FloatingToolTrigger({
       className={`tool-menu tool-menu--floating${open ? ' is-open' : ''}${dragging ? ' is-dragging' : ''}`}
       style={{
         transform: `translate3d(${position.x}px, ${position.y}px, 0)`,
+        ...layerStyle,
       }}
     >
       <button
@@ -5447,6 +5569,7 @@ function FloatingRadarDock({
   spawn,
   resetSignal,
   visible = true,
+  layerStyle,
   onPositionChange,
   onInteract,
 }) {
@@ -5543,13 +5666,6 @@ function FloatingRadarDock({
       ),
       y: clamp(nextY, margin, window.innerHeight - height - margin),
     };
-  };
-
-  const snapToAnchor = () => {
-    hasUserMovedRef.current = false;
-    clearStoredPosition(storageKey);
-    const anchored = anchoredPosition();
-    setPosition(clampDockPosition(anchored.x, anchored.y, { expanded: false }));
   };
 
   useEffect(() => {
@@ -5700,7 +5816,6 @@ function FloatingRadarDock({
 
       if (wasClick && action === 'toggle') {
         onInteract();
-        snapToAnchor();
         setExpanded((current) => !current);
       }
     };
@@ -5792,6 +5907,7 @@ function FloatingRadarDock({
       className={`score-dock${panelSide === 'left' ? ' is-flipped' : ''}${expanded ? ' is-expanded' : ''}${dragging ? ' is-dragging' : ''}${visible ? '' : ' is-hidden'}`}
       style={{
         transform: `translate3d(${position.x}px, ${position.y}px, 0)`,
+        ...layerStyle,
       }}
     >
       <button
@@ -5830,6 +5946,7 @@ function AtomSketch({
   onPointerLeave,
 }) {
   const phase = pulse * Math.PI * 2;
+  const useDetailFilters = atoms.length <= LARGE_SCENE_ATOM_THRESHOLD;
   const backAtoms = atoms
     .filter((atom) => atom.position.z < 0)
     .sort((left, right) => left.position.z - right.position.z);
@@ -5873,7 +5990,7 @@ function AtomSketch({
         </filter>
       </defs>
 
-      <g className="aura-layer" filter="url(#glow)">
+      <g className="aura-layer" filter={useDetailFilters ? 'url(#glow)' : undefined}>
         {standalone ? (
           <g
             className="center-aura"
@@ -5919,7 +6036,7 @@ function AtomSketch({
         ))}
       </g>
 
-      <g className="sketch-core" filter="url(#smudge)">
+      <g className="sketch-core" filter={useDetailFilters ? 'url(#smudge)' : undefined}>
         {backAtoms.map((atom) => (
           <SketchAtom
             key={`back-${atom.id}`}
@@ -6072,6 +6189,9 @@ export default function App() {
     current: new THREE.Quaternion(),
     target: new THREE.Quaternion(),
     lastTrack: new THREE.Vector3(0, 0, 1),
+    spinAxis: new THREE.Vector3(0, 1, 0),
+    spinVelocity: 0,
+    lastDragAt: 0,
   });
   const spreadRef = useRef({ current: 0, target: 0, timeoutId: null });
   const dragRef = useRef({ atomId: null, moved: false, startX: 0, startY: 0 });
@@ -6087,12 +6207,13 @@ export default function App() {
   const frameCommitRef = useRef(0);
   const targetTiltRef = useRef({ x: 0, y: 0 });
   const currentTiltRef = useRef({ x: 0, y: 0 });
+  const pendingHoverInfoRef = useRef(null);
   const [portfolioEntries, setPortfolioEntries] = useState([]);
   const [activePortfolioId, setActivePortfolioId] = useState(null);
   const [portfolioError, setPortfolioError] = useState('');
   const [portfolioErrorClosing, setPortfolioErrorClosing] = useState(false);
-  const [hoveredReviewEntryId, setHoveredReviewEntryId] = useState(null);
-  const [hoveredReviewAnchorRect, setHoveredReviewAnchorRect] = useState(null);
+  const [hoveredFileEntryId, setHoveredFileEntryId] = useState(null);
+  const [hoveredFileAnchorRect, setHoveredFileAnchorRect] = useState(null);
   const [toolTrayOpen, setToolTrayOpen] = useState(false);
   const [toolTriggerPosition, setToolTriggerPosition] = useState(() =>
     readStoredPosition(STORAGE_KEYS.toolTriggerPosition),
@@ -6116,8 +6237,12 @@ export default function App() {
   const [hoverInfo, setHoverInfo] = useState(null);
   const [frameTime, setFrameTime] = useState(0);
   const [shootingStar, setShootingStar] = useState(null);
+  const [fileDragActive, setFileDragActive] = useState(false);
+  const fileDragCounterRef = useRef(0);
+  const [portfolioLoading, setPortfolioLoading] = useState(false);
   const [introCenterBurstAt, setIntroCenterBurstAt] = useState(-1);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [activeFloatingTool, setActiveFloatingTool] = useState(null);
   const [language, setLanguage] = useState(() => {
     if (typeof window === 'undefined') {
       return 'ko';
@@ -6139,6 +6264,45 @@ export default function App() {
     interactionRef.current.lastInputAt = performance.now();
   };
 
+  const interactWithFloatingTool = useCallback((toolKey) => {
+    noteInteraction();
+    setActiveFloatingTool((current) => (current === toolKey ? current : toolKey));
+  }, []);
+
+  const floatingLayerStyleFor = useCallback(
+    (toolKey) => ({
+      zIndex:
+        activeFloatingTool === toolKey
+          ? ACTIVE_FLOATING_TOOL_Z_INDEX
+          : FLOATING_TOOL_Z_INDEX[toolKey],
+    }),
+    [activeFloatingTool],
+  );
+  const interactWithSettingsTool = useCallback(
+    () => interactWithFloatingTool('settings'),
+    [interactWithFloatingTool],
+  );
+  const interactWithGroupTool = useCallback(
+    () => interactWithFloatingTool('group'),
+    [interactWithFloatingTool],
+  );
+  const interactWithHeatmapTool = useCallback(
+    () => interactWithFloatingTool('heatmap'),
+    [interactWithFloatingTool],
+  );
+  const interactWithScoreTool = useCallback(
+    () => interactWithFloatingTool('score'),
+    [interactWithFloatingTool],
+  );
+  const interactWithToolMenu = useCallback(
+    () => interactWithFloatingTool('tool-menu'),
+    [interactWithFloatingTool],
+  );
+  const interactWithAllocationTool = useCallback(
+    () => interactWithFloatingTool('allocation'),
+    [interactWithFloatingTool],
+  );
+
   const openPortfolioPicker = () => {
     noteInteraction();
     fileInputRef.current?.click();
@@ -6154,16 +6318,15 @@ export default function App() {
     setPortfolioError('');
   };
 
-  const clearHoveredReviewPreview = useCallback(() => {
-    setHoveredReviewEntryId(null);
-    setHoveredReviewAnchorRect(null);
+  const clearHoveredFileTooltip = useCallback(() => {
+    setHoveredFileEntryId(null);
+    setHoveredFileAnchorRect(null);
   }, []);
 
-  const openHoveredReviewPreview = useCallback(
+  const openHoveredFileTooltip = useCallback(
     (entry, anchorElement) => {
-      const preview = buildUploadReviewPreview(entry);
-      if (!preview || !anchorElement) {
-        clearHoveredReviewPreview();
+      if (!entry || !anchorElement) {
+        clearHoveredFileTooltip();
         return;
       }
 
@@ -6175,8 +6338,8 @@ export default function App() {
         height: Math.round(bounds.height * 100) / 100,
       };
 
-      setHoveredReviewEntryId(entry.id);
-      setHoveredReviewAnchorRect((current) => {
+      setHoveredFileEntryId(entry.id);
+      setHoveredFileAnchorRect((current) => {
         if (
           current &&
           current.left === nextAnchorRect.left &&
@@ -6190,8 +6353,50 @@ export default function App() {
         return nextAnchorRect;
       });
     },
-    [clearHoveredReviewPreview],
+    [clearHoveredFileTooltip],
   );
+
+  const scheduleSecurityMetadataEnrichment = useCallback((entryId, seedItems) => {
+    if (!entryId || !Array.isArray(seedItems) || !seedItems.some(hasMissingCoreMetadata)) {
+      return;
+    }
+
+    void (async () => {
+      let workingItems = seedItems;
+
+      for (const delayMs of SECURITY_ENRICHMENT_RETRY_DELAYS_MS) {
+        if (delayMs > 0) {
+          await wait(delayMs);
+        }
+
+        try {
+          const enrichment = await enrichSecurityItemsViaApi(workingItems, { force: true });
+          if (!Array.isArray(enrichment?.items) || !enrichment.items.length) {
+            continue;
+          }
+
+          workingItems = enrichment.items;
+
+          setPortfolioEntries((current) =>
+            current.map((entry) =>
+              entry.id === entryId
+                ? {
+                    ...entry,
+                    items: mergeSecurityMetadataItems(entry.items, enrichment.items),
+                  }
+                : entry,
+            ),
+          );
+
+          if (!workingItems.some(hasMissingCoreMetadata)) {
+            return;
+          }
+        } catch {
+          // Keep the best available local or server-derived metadata and retry later.
+        }
+      }
+    })();
+  }, []);
 
   const settingsDock = useFloatingHandle({
     initialPosition: (win) => {
@@ -6206,7 +6411,7 @@ export default function App() {
       const size = gearSizeFor(width);
       return { width: size, height: size };
     },
-    onInteract: noteInteraction,
+    onInteract: interactWithSettingsTool,
     onPress: () => {
       setSettingsOpen((current) => !current);
     },
@@ -6234,23 +6439,11 @@ export default function App() {
   const updateHoverInfo = (atomId, clientX, clientY) => {
     const viewportWidth = window.innerWidth;
     const viewportHeight = window.innerHeight;
-    const nextHoverInfo = {
+    pendingHoverInfoRef.current = {
       atomId,
       x: Math.round(clamp(clientX + 18, 16, viewportWidth - TOOLTIP_WIDTH - 16)),
       y: Math.round(clamp(clientY + 18, 16, viewportHeight - TOOLTIP_HEIGHT - 16)),
     };
-
-    setHoverInfo((current) => {
-      if (
-        current?.atomId === nextHoverInfo.atomId &&
-        current.x === nextHoverInfo.x &&
-        current.y === nextHoverInfo.y
-      ) {
-        return current;
-      }
-
-      return nextHoverInfo;
-    });
   };
 
   const clientToLocalPoint = (clientX, clientY) => {
@@ -6324,6 +6517,7 @@ export default function App() {
     let last = performance.now();
     const autoRotateY = new THREE.Quaternion();
     const autoRotateX = new THREE.Quaternion();
+    const spinQuaternion = new THREE.Quaternion();
     const yAxis = new THREE.Vector3(0, 1, 0);
     const xAxis = new THREE.Vector3(1, 0, 0);
 
@@ -6331,6 +6525,8 @@ export default function App() {
       const delta = Math.min((now - last) / 1000, 0.05);
       last = now;
       const motionPreference = motionPreferenceRef.current;
+      const isDraggingStructure = Boolean(dragRef.current.atomId);
+      const hasDragSpin = rotationRef.current.spinVelocity > 0.01;
 
       if (!motionPreference.visible) {
         frameId = window.requestAnimationFrame(animate);
@@ -6353,11 +6549,11 @@ export default function App() {
       if (shellRef.current) {
         shellRef.current.style.setProperty(
           '--drift-x',
-          `${(motionPreference.reduced ? 0 : currentTiltRef.current.x * 8).toFixed(2)}px`,
+          `${(motionPreference.reduced ? 0 : currentTiltRef.current.x * 4).toFixed(2)}px`,
         );
         shellRef.current.style.setProperty(
           '--drift-y',
-          `${(motionPreference.reduced ? 0 : currentTiltRef.current.y * 8).toFixed(2)}px`,
+          `${(motionPreference.reduced ? 0 : currentTiltRef.current.y * 4).toFixed(2)}px`,
         );
       }
 
@@ -6375,9 +6571,21 @@ export default function App() {
 
       const shouldAutoRotate =
         !motionPreference.reduced &&
-        !dragRef.current.atomId &&
+        !isDraggingStructure &&
         !interactionRef.current.hoveringAtomId &&
         !interactionRef.current.selectedAtomId;
+
+      if (!motionPreference.reduced && !isDraggingStructure && hasDragSpin) {
+        spinQuaternion.setFromAxisAngle(
+          rotationRef.current.spinAxis,
+          Math.min(rotationRef.current.spinVelocity * delta, 0.04),
+        );
+        rotationRef.current.target.premultiply(spinQuaternion).normalize();
+        rotationRef.current.spinVelocity *= Math.exp(-DRAG_SPIN_DECAY * delta);
+        if (rotationRef.current.spinVelocity < 0.01) {
+          rotationRef.current.spinVelocity = 0;
+        }
+      }
 
       if (shouldAutoRotate) {
         autoRotateY.setFromAxisAngle(yAxis, delta * AUTO_ROTATE_SPEED);
@@ -6390,19 +6598,19 @@ export default function App() {
 
       rotationRef.current.current.slerp(
         rotationRef.current.target,
-        1 - Math.exp(-(dragRef.current.atomId ? 24 : 10) * delta),
+        1 - Math.exp(-(isDraggingStructure ? DRAG_ROTATION_RESPONSE : IDLE_ROTATION_RESPONSE) * delta),
       );
       rotationRef.current.current.normalize();
       const idleDriftX =
         motionPreference.reduced
           ? 0
           : Math.sin(now * 0.00018) * 8.2 +
-            Math.cos(now * 0.000071 + currentTiltRef.current.x * 1.6) * 3.1;
+            Math.cos(now * 0.000071 + currentTiltRef.current.x * 0.8) * 2.0;
       const idleDriftY =
         motionPreference.reduced
           ? 0
           : Math.cos(now * 0.00015) * 6.4 +
-            Math.sin(now * 0.000096 + currentTiltRef.current.y * 1.8) * 2.6;
+            Math.sin(now * 0.000096 + currentTiltRef.current.y * 0.9) * 1.8;
 
       cameraRef.current.target.focus = 0;
       cameraRef.current.target.panX = 0;
@@ -6467,10 +6675,28 @@ export default function App() {
 
       if (
         now - frameCommitRef.current >=
-        sceneFrameIntervalFor(atomsRef.current.length, motionPreference.reduced)
+        sceneFrameIntervalFor(
+          atomsRef.current.length,
+          motionPreference.reduced,
+          isDraggingStructure || hasDragSpin,
+        )
       ) {
         frameCommitRef.current = now;
         setFrameTime(now);
+        if (pendingHoverInfoRef.current !== null) {
+          const pending = pendingHoverInfoRef.current;
+          pendingHoverInfoRef.current = null;
+          setHoverInfo((current) => {
+            if (
+              current?.atomId === pending.atomId &&
+              current.x === pending.x &&
+              current.y === pending.y
+            ) {
+              return current;
+            }
+            return pending;
+          });
+        }
       }
       frameId = window.requestAnimationFrame(animate);
     };
@@ -6596,6 +6822,37 @@ export default function App() {
   }, [settingsOpen]);
 
   useEffect(() => {
+    const handleKeyDown = (event) => {
+      if (
+        event.target instanceof HTMLInputElement ||
+        event.target instanceof HTMLTextAreaElement ||
+        event.target instanceof HTMLSelectElement ||
+        event.target.isContentEditable
+      ) {
+        return;
+      }
+
+      if (event.key === 'Escape') {
+        if (settingsOpen) {
+          setSettingsOpen(false);
+        } else if (toolTrayOpen) {
+          setToolTrayOpen(false);
+        }
+        return;
+      }
+
+      if ((event.key === 'u' || event.key === 'U') && !event.metaKey && !event.ctrlKey && !event.altKey) {
+        openPortfolioPicker();
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [settingsOpen, toolTrayOpen]);
+
+  useEffect(() => {
     if (!portfolioError) {
       setPortfolioErrorClosing(false);
       return undefined;
@@ -6603,10 +6860,10 @@ export default function App() {
 
     const fadeId = window.setTimeout(() => {
       setPortfolioErrorClosing(true);
-    }, 1600);
+    }, 3000);
     const clearId = window.setTimeout(() => {
       clearPortfolioError();
-    }, 2200);
+    }, 3600);
 
     return () => {
       window.clearTimeout(fadeId);
@@ -6623,9 +6880,11 @@ export default function App() {
     atomsRef.current = generateAtomLayout(portfolioItems).map(createAtomState);
     dragRef.current.atomId = null;
     dragRef.current.moved = false;
+    rotationRef.current.spinVelocity = 0;
     interactionRef.current.hoveringAtomId = null;
     interactionRef.current.selectedAtomId = null;
     interactionRef.current.lastInputAt = performance.now();
+    pendingHoverInfoRef.current = null;
     document.body.style.cursor = '';
     setSelectedAtomId(null);
     setHoverInfo(null);
@@ -6639,6 +6898,8 @@ export default function App() {
 
   useEffect(() => {
     const deltaQuaternion = new THREE.Quaternion();
+    const appliedDeltaQuaternion = new THREE.Quaternion();
+    const dragSpinAxis = new THREE.Vector3();
 
     const updateDraggedStructure = (event) => {
       if (!dragRef.current.atomId) {
@@ -6663,7 +6924,31 @@ export default function App() {
 
       const nextTrack = trackballVector(point);
       deltaQuaternion.setFromUnitVectors(rotationRef.current.lastTrack, nextTrack);
-      rotationRef.current.target.premultiply(deltaQuaternion).normalize();
+      appliedDeltaQuaternion.identity().slerp(deltaQuaternion, DRAG_ROTATION_SENSITIVITY);
+      rotationRef.current.target.premultiply(appliedDeltaQuaternion).normalize();
+      const now = performance.now();
+      const elapsed = rotationRef.current.lastDragAt
+        ? Math.max((now - rotationRef.current.lastDragAt) / 1000, 0.001)
+        : 0;
+      const quaternionW = clamp(appliedDeltaQuaternion.w, -1, 1);
+      const angle = 2 * Math.acos(quaternionW);
+      const sinHalfAngle = Math.sqrt(Math.max(0, 1 - quaternionW * quaternionW));
+
+      if (elapsed > 0 && angle > 0.0001 && sinHalfAngle > 0.0001) {
+        dragSpinAxis
+          .set(
+            appliedDeltaQuaternion.x / sinHalfAngle,
+            appliedDeltaQuaternion.y / sinHalfAngle,
+            appliedDeltaQuaternion.z / sinHalfAngle,
+          )
+          .normalize();
+        rotationRef.current.spinAxis.lerp(dragSpinAxis, 0.42).normalize();
+        rotationRef.current.spinVelocity =
+          rotationRef.current.spinVelocity * 0.52 +
+          clamp(angle / elapsed, 0, MAX_DRAG_SPIN_VELOCITY) * 0.48;
+      }
+
+      rotationRef.current.lastDragAt = now;
       rotationRef.current.lastTrack.copy(nextTrack);
     };
 
@@ -6681,7 +6966,13 @@ export default function App() {
 
       dragRef.current.atomId = null;
       dragRef.current.moved = false;
+      if (!wasMoved) {
+        rotationRef.current.spinVelocity = 0;
+      } else {
+        interactionRef.current.hoveringAtomId = null;
+      }
       interactionRef.current.lastInputAt = performance.now();
+      pendingHoverInfoRef.current = null;
       document.body.style.cursor = '';
       setHoverInfo(null);
 
@@ -6733,6 +7024,10 @@ export default function App() {
     noteInteraction();
     atom.dragging = true;
     rotationRef.current.lastTrack.copy(trackballVector(point));
+    rotationRef.current.lastDragAt = performance.now();
+    rotationRef.current.spinVelocity = 0;
+    frameCommitRef.current = 0;
+    pendingHoverInfoRef.current = null;
     document.body.style.cursor = 'grabbing';
     setHoverInfo(null);
   };
@@ -6748,6 +7043,8 @@ export default function App() {
     interactionRef.current.hoveringAtomId = atomId;
     noteInteraction();
     updateHoverInfo(atomId, event.clientX, event.clientY);
+    targetTiltRef.current.x = 0;
+    targetTiltRef.current.y = 0;
 
     if (!atom.dragging) {
       document.body.style.cursor = 'grab';
@@ -6768,12 +7065,18 @@ export default function App() {
     const atom = atomsRef.current.find((item) => item.id === atomId);
 
     if (!atom) {
+      if (pendingHoverInfoRef.current?.atomId === atomId) {
+        pendingHoverInfoRef.current = null;
+      }
       return;
     }
 
     atom.hovered = false;
     if (interactionRef.current.hoveringAtomId === atomId) {
       interactionRef.current.hoveringAtomId = null;
+    }
+    if (pendingHoverInfoRef.current?.atomId === atomId) {
+      pendingHoverInfoRef.current = null;
     }
     noteInteraction();
     setHoverInfo((current) => (current?.atomId === atomId ? null : current));
@@ -6785,9 +7088,13 @@ export default function App() {
 
   const handlePointerMove = (event) => {
     noteInteraction();
-    const bounds = event.currentTarget.getBoundingClientRect();
-    const relativeX = (event.clientX - bounds.left) / bounds.width;
-    const relativeY = (event.clientY - bounds.top) / bounds.height;
+    if (interactionRef.current.hoveringAtomId) {
+      return;
+    }
+    const viewportWidth = window.innerWidth || event.currentTarget.clientWidth || 1;
+    const viewportHeight = window.innerHeight || event.currentTarget.clientHeight || 1;
+    const relativeX = event.clientX / viewportWidth;
+    const relativeY = event.clientY / viewportHeight;
 
     targetTiltRef.current.x = clamp(relativeX * 2 - 1, -1, 1);
     targetTiltRef.current.y = clamp(relativeY * 2 - 1, -1, 1);
@@ -6836,6 +7143,8 @@ export default function App() {
       return;
     }
 
+    setPortfolioLoading(true);
+
     try {
       const nextPreparedEntries = [];
 
@@ -6878,6 +7187,7 @@ export default function App() {
         [...current, ...nextPreparedEntries.map((entry) => entry.localEntry)].slice(0, MAX_PORTFOLIOS),
       );
       setActivePortfolioId((current) => current ?? nextPreparedEntries[0]?.entryId ?? null);
+      setPortfolioLoading(false);
 
       nextPreparedEntries.forEach(
         ({ entryId, fileName, text, localItems, localParserDiagnostics }) => {
@@ -6945,49 +7255,196 @@ export default function App() {
                 entry.id === entryId ? createPortfolioEntryFromPayload(payload, entryId) : entry,
               ),
             );
-
-            if (Array.isArray(payload?.items) && payload.items.some(hasMissingCoreMetadata)) {
-              void (async () => {
-                try {
-                  const previousMissingCount = payload.items.filter(hasMissingCoreMetadata).length;
-                  const enrichment = await enrichSecurityItemsViaApi(payload.items, { force: true });
-                  if (!Array.isArray(enrichment?.items) || !enrichment.items.length) {
-                    return;
-                  }
-
-                  const nextMissingCount = enrichment.items.filter(hasMissingCoreMetadata).length;
-                  if (nextMissingCount >= previousMissingCount) {
-                    return;
-                  }
-
-                  setPortfolioEntries((current) =>
-                    current.map((entry) =>
-                      entry.id === entryId
-                        ? {
-                            ...entry,
-                            items: enrichment.items,
-                          }
-                        : entry,
-                    ),
-                  );
-                } catch {
-                  // Keep the best-effort metadata already shown when the retry fails.
-                }
-              })();
-            }
+            scheduleSecurityMetadataEnrichment(entryId, payload?.items);
           })();
         },
       );
     } catch (error) {
       showPortfolioError(error instanceof Error ? error.message : currentText.readError);
+      setPortfolioLoading(false);
     } finally {
       event.target.value = '';
     }
   };
 
+  const processPortfolioFiles = async (files) => {
+    const currentText = textFor(language);
+
+    if (!files.length) {
+      return;
+    }
+
+    noteInteraction();
+
+    const remainingSlots = Math.max(0, MAX_PORTFOLIOS - portfolioEntries.length);
+    if (!remainingSlots) {
+      showPortfolioError(currentText.maxFilesError);
+      return;
+    }
+
+    setPortfolioLoading(true);
+
+    try {
+      const nextPreparedEntries = [];
+
+      for (const file of files.slice(0, remainingSlots)) {
+        const text = await readPortfolioFile(file);
+        const { items: localItems, diagnostics: localParserDiagnostics } =
+          parsePortfolioTextDetailedShared(text);
+
+        if (!localItems.length) {
+          throw new Error(`${file.name}: ${currentText.parseError}`);
+        }
+
+        const entryId =
+          typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+            ? crypto.randomUUID()
+            : `portfolio-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+
+        nextPreparedEntries.push({
+          entryId,
+          fileName: file.name,
+          text,
+          localItems,
+          localParserDiagnostics,
+          localEntry: createPortfolioEntryFromPayload(
+            buildLocalPortfolioPayload(file.name, localItems, localParserDiagnostics),
+            entryId,
+          ),
+        });
+      }
+
+      clearPortfolioError();
+      setToolTrayOpen(false);
+      setSelectedAtomId(null);
+      setActiveGroupKey(null);
+      setShowGroupDock(true);
+      setShowScoreDock(true);
+      setGroupDockSpawn(null);
+      setScoreDockSpawn(null);
+      setPortfolioEntries((current) =>
+        [...current, ...nextPreparedEntries.map((entry) => entry.localEntry)].slice(0, MAX_PORTFOLIOS),
+      );
+      setActivePortfolioId((current) => current ?? nextPreparedEntries[0]?.entryId ?? null);
+      setPortfolioLoading(false);
+
+      nextPreparedEntries.forEach(
+        ({ entryId, fileName, text, localItems, localParserDiagnostics }) => {
+          void (async () => {
+            let payload;
+
+            try {
+              payload = await ingestPortfolioTextViaApi(fileName, text);
+
+              if (shouldFallbackToLocalTimelineShared(payload, localItems)) {
+                payload = {
+                  ...buildLocalPortfolioPayload(fileName, localItems, localParserDiagnostics, {
+                    agentReview: {
+                      ...(payload.agentReview ?? {}),
+                      status:
+                        payload.agentReview?.status === 'blocked' ? 'blocked' : 'needs-review',
+                      summary:
+                        payload.agentReview?.summary ??
+                        '서버 결과를 받았지만 시계열 데이터는 로컬 파서를 우선 적용했습니다.',
+                      warnings: [
+                        ...(payload.agentReview?.warnings ?? []),
+                        {
+                          code: 'local-timeline-override',
+                          severity: 'warning',
+                          message:
+                            '서버 시계열 결과가 너무 짧아 로컬 파서의 timeline 데이터를 표시합니다.',
+                          source: 'client-fallback',
+                        },
+                      ],
+                    },
+                    ingestSource: 'server-with-local-timeline',
+                  }),
+                };
+              } else {
+                payload = {
+                  ...payload,
+                  ingestSource: 'server',
+                };
+              }
+            } catch {
+              payload = buildLocalPortfolioPayload(fileName, localItems, localParserDiagnostics, {
+                agentReview: {
+                  mode: 'client-local-fallback',
+                  status: localItems.length ? 'needs-review' : 'blocked',
+                  summary: '서버 ingest에 실패해 브라우저 로컬 파서 결과를 유지합니다.',
+                  warnings: [
+                    {
+                      code: 'server-ingest-failed',
+                      severity: 'warning',
+                      message: 'Server ingest failed. Showing the local parser result instead.',
+                      source: 'client-fallback',
+                    },
+                  ],
+                  agents: [],
+                },
+                ingestSource: 'client-local-fallback',
+              });
+            }
+
+            setPortfolioEntries((current) =>
+              current.map((entry) =>
+                entry.id === entryId ? createPortfolioEntryFromPayload(payload, entryId) : entry,
+              ),
+            );
+            scheduleSecurityMetadataEnrichment(entryId, payload?.items);
+          })();
+        },
+      );
+    } catch (error) {
+      showPortfolioError(error instanceof Error ? error.message : currentText.readError);
+      setPortfolioLoading(false);
+    }
+  };
+
+  const handleFileDragEnter = (event) => {
+    if (!event.dataTransfer?.types?.includes('Files')) {
+      return;
+    }
+
+    event.preventDefault();
+    fileDragCounterRef.current += 1;
+    setFileDragActive(true);
+  };
+
+  const handleFileDragOver = (event) => {
+    if (!event.dataTransfer?.types?.includes('Files')) {
+      return;
+    }
+
+    event.preventDefault();
+    event.dataTransfer.dropEffect = 'copy';
+  };
+
+  const handleFileDragLeave = (event) => {
+    fileDragCounterRef.current -= 1;
+    if (fileDragCounterRef.current <= 0) {
+      fileDragCounterRef.current = 0;
+      setFileDragActive(false);
+    }
+  };
+
+  const handleFileDrop = async (event) => {
+    event.preventDefault();
+    fileDragCounterRef.current = 0;
+    setFileDragActive(false);
+
+    const files = Array.from(event.dataTransfer?.files ?? []).filter((file) => {
+      const name = file.name.toLowerCase();
+      return name.endsWith('.csv') || name.endsWith('.tsv') || name.endsWith('.txt') ||
+        file.type === 'text/csv' || file.type === 'text/tab-separated-values' || file.type === 'text/plain';
+    });
+
+    await processPortfolioFiles(files);
+  };
+
   const handleClearPortfolio = (entryId) => {
     noteInteraction();
-    clearHoveredReviewPreview();
+    clearHoveredFileTooltip();
     const nextEntries = portfolioEntries.filter((entry) => entry.id !== entryId);
     const nextActiveId =
       activePortfolioId === entryId ? nextEntries[0]?.id ?? null : activePortfolioId;
@@ -7012,18 +7469,14 @@ export default function App() {
   const hasPortfolio = portfolioEntries.length > 0;
   const showPortfolioChrome = hasPortfolio;
   const text = textFor(language);
-  const hoveredReviewEntry = useMemo(
-    () => portfolioEntries.find((entry) => entry.id === hoveredReviewEntryId) ?? null,
-    [hoveredReviewEntryId, portfolioEntries],
+  const hoveredFileEntry = useMemo(
+    () => portfolioEntries.find((entry) => entry.id === hoveredFileEntryId) ?? null,
+    [hoveredFileEntryId, portfolioEntries],
   );
-  const hoveredReviewPreview = useMemo(
-    () => buildUploadReviewPreview(hoveredReviewEntry),
-    [hoveredReviewEntry],
-  );
-  const hoveredReviewStyle = useMemo(() => {
+  const hoveredFileTooltipStyle = useMemo(() => {
     if (
-      !hoveredReviewPreview ||
-      !hoveredReviewAnchorRect ||
+      !hoveredFileEntry ||
+      !hoveredFileAnchorRect ||
       !uploadPlusWrapRef.current ||
       typeof window === 'undefined'
     ) {
@@ -7036,7 +7489,7 @@ export default function App() {
       160,
       REVIEW_TOOLTIP_MAX_WIDTH,
     );
-    const anchorCenter = hoveredReviewAnchorRect.left + hoveredReviewAnchorRect.width * 0.5;
+    const anchorCenter = hoveredFileAnchorRect.left + hoveredFileAnchorRect.width * 0.5;
     const clampedCenter = clamp(
       anchorCenter,
       REVIEW_TOOLTIP_VIEWPORT_INSET + maxWidth * 0.5,
@@ -7045,15 +7498,15 @@ export default function App() {
 
     return {
       left: `${clampedCenter - containerRect.left}px`,
-      top: `${hoveredReviewAnchorRect.top - containerRect.top - REVIEW_TOOLTIP_VERTICAL_GAP}px`,
-      width: `${maxWidth}px`,
+      top: `${hoveredFileAnchorRect.top - containerRect.top - REVIEW_TOOLTIP_VERTICAL_GAP}px`,
+      maxWidth: `${maxWidth}px`,
     };
-  }, [hoveredReviewAnchorRect, hoveredReviewPreview]);
+  }, [hoveredFileAnchorRect, hoveredFileEntry]);
   useEffect(() => {
-    if (hoveredReviewEntryId && !hoveredReviewPreview) {
-      clearHoveredReviewPreview();
+    if (hoveredFileEntryId && !hoveredFileEntry) {
+      clearHoveredFileTooltip();
     }
-  }, [clearHoveredReviewPreview, hoveredReviewEntryId, hoveredReviewPreview]);
+  }, [clearHoveredFileTooltip, hoveredFileEntry, hoveredFileEntryId]);
   const groupOptions = groupOptionsFor(language);
   const scoreAxes = scoreAxesFor(language);
   const handleResetDockLayout = () => {
@@ -7287,44 +7740,67 @@ export default function App() {
       '--shooting-star-opacity': format(shootingStar.opacity),
     };
   }, [shootingStar]);
-  const atoms = atomsRef.current.map((atom) => {
-    const position = atom.baseDirection
-      .clone()
-      .applyQuaternion(rotationRef.current.current)
-      .multiplyScalar(BOND_LENGTH);
-    const projection = projectPoint(position, cameraMotion);
+  const atoms = useMemo(
+    () =>
+      atomsRef.current.map((atom) => {
+        const position = atom.baseDirection
+          .clone()
+          .applyQuaternion(rotationRef.current.current)
+          .multiplyScalar(BOND_LENGTH);
+        const projection = projectPoint(position, cameraMotion);
+        const matchesActiveGroup =
+          highlightActive &&
+          canHighlightGroupField(atom, activeGroupKey) &&
+          normalizeDisplayKey(atom[activeGroupKey]) === normalizedActiveGroupValue;
 
-    return {
-      ...atom,
-      ...projection,
-      x: projection.x * spreadScale,
-      y: projection.y * spreadScale,
-      scale: projection.scale * nodeShrink,
-      isSelected: atom.id === selectedAtomId,
-      isGroupMatch: highlightActive
-        ? canHighlightGroupField(atom, activeGroupKey) &&
-          normalizeDisplayKey(atom[activeGroupKey]) === normalizedActiveGroupValue
-        : false,
-      dimmed: highlightActive
-        ? !(
-            canHighlightGroupField(atom, activeGroupKey) &&
-            normalizeDisplayKey(atom[activeGroupKey]) === normalizedActiveGroupValue
-          )
-        : false,
-      position,
-    };
-  });
+        return {
+          ...atom,
+          ...projection,
+          x: projection.x * spreadScale,
+          y: projection.y * spreadScale,
+          scale: projection.scale * nodeShrink,
+          isSelected: atom.id === selectedAtomId,
+          isGroupMatch: matchesActiveGroup,
+          dimmed: highlightActive ? !matchesActiveGroup : false,
+          position,
+        };
+      }),
+    [
+      activeGroupKey,
+      cameraMotion,
+      frameTime,
+      highlightActive,
+      nodeShrink,
+      normalizedActiveGroupValue,
+      selectedAtomId,
+      spreadScale,
+    ],
+  );
   const hoveredAtom = atoms.find((atom) => atom.id === hoverInfo?.atomId) ?? null;
 
   return (
     <main
       ref={shellRef}
-      className="app-shell"
+      className={`app-shell${fileDragActive ? ' is-file-drag' : ''}`}
       style={sceneStyle}
       onPointerMove={handlePointerMove}
       onPointerLeave={handlePointerLeave}
       onWheel={handleWheel}
+      onDragEnter={handleFileDragEnter}
+      onDragOver={handleFileDragOver}
+      onDragLeave={handleFileDragLeave}
+      onDrop={handleFileDrop}
     >
+      {fileDragActive ? (
+        <div className="file-drop-overlay" aria-hidden="true">
+          <div className="file-drop-overlay__inner">
+            <div className="file-drop-overlay__icon">
+              <SketchUploadArrowIcon />
+            </div>
+            <p className="file-drop-overlay__label">{text.uploadDragHint}</p>
+          </div>
+        </div>
+      ) : null}
       <div className="space-depth" aria-hidden="true">
         <div className="space-depth__nebula space-depth__nebula--far" />
         <div className="space-depth__stars space-depth__stars--far" />
@@ -7352,9 +7828,10 @@ export default function App() {
             spawn={groupDockSpawn}
             resetSignal={dockResetAt}
             visible={toolTrayOpen}
+            layerStyle={floatingLayerStyleFor('group')}
             onAnchorPositionChange={setGroupDockPosition}
             onChange={setActiveGroupKey}
-            onInteract={noteInteraction}
+            onInteract={interactWithGroupTool}
           />
         ) : null}
 
@@ -7371,8 +7848,9 @@ export default function App() {
             language={language}
             visible={toolTrayOpen}
             resetSignal={dockResetAt}
+            layerStyle={floatingLayerStyleFor('heatmap')}
             onAnchorPositionChange={setHeatmapDockPosition}
-            onInteract={noteInteraction}
+            onInteract={interactWithHeatmapTool}
           />
         ) : null}
 
@@ -7387,8 +7865,9 @@ export default function App() {
             spawn={scoreDockSpawn}
             resetSignal={dockResetAt}
             visible={toolTrayOpen}
+            layerStyle={floatingLayerStyleFor('score')}
             onPositionChange={setScoreDockPosition}
-            onInteract={noteInteraction}
+            onInteract={interactWithScoreTool}
           />
         ) : null}
 
@@ -7417,7 +7896,8 @@ export default function App() {
               setDockResetAt(performance.now());
             }}
             onPositionChange={setToolTriggerPosition}
-            onInteract={noteInteraction}
+            layerStyle={floatingLayerStyleFor('tool-menu')}
+            onInteract={interactWithToolMenu}
           />
         ) : null}
 
@@ -7431,7 +7911,8 @@ export default function App() {
             resetSignal={dockResetAt}
             visible={toolTrayOpen}
             settingsOpen={settingsOpen}
-            onInteract={noteInteraction}
+            layerStyle={floatingLayerStyleFor('allocation')}
+            onInteract={interactWithAllocationTool}
           />
         ) : null}
 
@@ -7440,6 +7921,7 @@ export default function App() {
           className={`settings-anchor${settingsPanelSide === 'right' ? ' is-flipped' : ''}${settingsDock.dragging ? ' is-dragging' : ''}`}
           style={{
             transform: `translate3d(${settingsDock.position.x}px, ${settingsDock.position.y}px, 0)`,
+            ...floatingLayerStyleFor('settings'),
           }}
         >
           <div ref={settingsRef} className={`settings-wrap${settingsOpen ? ' is-open' : ''}`}>
@@ -7504,10 +7986,11 @@ export default function App() {
               <div ref={uploadPlusWrapRef} className="upload-plus-wrap is-loaded">
                 <button
                   ref={uploadButtonRef}
-                  className="upload-plus"
+                  className={`upload-plus${portfolioLoading ? ' is-loading' : ''}`}
                   type="button"
                   onClick={openPortfolioPicker}
                   aria-label={text.uploadAria}
+                  aria-busy={portfolioLoading}
                 >
                   <SketchUploadArrowIcon />
                 </button>
@@ -7525,13 +8008,13 @@ export default function App() {
                           className="upload-file-chip__trigger"
                           type="button"
                           onMouseEnter={(event) => {
-                            if (!supportsHoverReviewPreview()) {
+                            if (!supportsHoverTooltip()) {
                               return;
                             }
 
-                            openHoveredReviewPreview(entry, event.currentTarget);
+                            openHoveredFileTooltip(entry, event.currentTarget);
                           }}
-                          onMouseLeave={clearHoveredReviewPreview}
+                          onMouseLeave={clearHoveredFileTooltip}
                           onFocus={(event) => {
                             if (
                               typeof event.currentTarget.matches === 'function' &&
@@ -7540,26 +8023,29 @@ export default function App() {
                               return;
                             }
 
-                            openHoveredReviewPreview(entry, event.currentTarget);
+                            openHoveredFileTooltip(entry, event.currentTarget);
                           }}
-                          onBlur={clearHoveredReviewPreview}
+                          onBlur={clearHoveredFileTooltip}
                           onClick={() => {
                             noteInteraction();
                             setActivePortfolioId(entry.id);
                           }}
                           aria-label={`${entry.fileName} · ${entryReviewLabel}`}
+                          title={entry.fileName}
                         >
                           <span
                             className={`upload-file-chip__status upload-file-chip__status--${entryReviewStatus}`}
                             aria-hidden="true"
                           />
-                          <span className="upload-file-chip__name">{entry.fileName}</span>
+                          <span className="upload-file-chip__name" title={entry.fileName}>
+                            {entry.fileName}
+                          </span>
                         </button>
                         <button
                           className="upload-file-chip__clear"
                           type="button"
-                          onMouseEnter={clearHoveredReviewPreview}
-                          onFocus={clearHoveredReviewPreview}
+                          onMouseEnter={clearHoveredFileTooltip}
+                          onFocus={clearHoveredFileTooltip}
                           onClick={() => handleClearPortfolio(entry.id)}
                           aria-label={text.clearUploadAria}
                         >
@@ -7569,33 +8055,9 @@ export default function App() {
                     );
                   })}
                 </div>
-                {hoveredReviewPreview && hoveredReviewStyle ? (
-                  <div className="upload-review-card" style={hoveredReviewStyle}>
-                    <div className="upload-review-card__header">
-                      <strong className="upload-review-card__title">{text.reviewTitle}</strong>
-                      <span
-                        className={`upload-review-card__status upload-review-card__status--${hoveredReviewPreview.status}`}
-                      >
-                        {reviewStatusLabel(text, hoveredReviewPreview.status)}
-                      </span>
-                    </div>
-                    {hoveredReviewPreview.summary ? (
-                      <p className="upload-review-card__summary">{hoveredReviewPreview.summary}</p>
-                    ) : null}
-                    {hoveredReviewPreview.warnings.length ? (
-                      <div className="upload-review-card__list">
-                        {hoveredReviewPreview.warnings.map((warning) => (
-                          <p
-                            key={`${warning.source ?? 'review'}-${warning.code}-${warning.message}`}
-                            className={`upload-review-card__item upload-review-card__item--${
-                              warning.severity ?? 'info'
-                            }`}
-                          >
-                            {warning.message}
-                          </p>
-                        ))}
-                      </div>
-                    ) : null}
+                {hoveredFileEntry && hoveredFileTooltipStyle ? (
+                  <div className="upload-file-name-tooltip" style={hoveredFileTooltipStyle}>
+                    {hoveredFileEntry.fileName}
                   </div>
                 ) : null}
               </div>
@@ -7604,10 +8066,12 @@ export default function App() {
           ) : (
             <div className="upload-plus-wrap">
               <button
-                className="upload-plus upload-plus--large"
+                ref={uploadButtonRef}
+                className={`upload-plus upload-plus--large${portfolioLoading ? ' is-loading' : ''}`}
                 type="button"
                 onClick={openPortfolioPicker}
                 aria-label={text.uploadAria}
+                aria-busy={portfolioLoading}
               >
                 <SketchUploadArrowIcon />
               </button>
@@ -7641,10 +8105,9 @@ export default function App() {
                   onPointerMove={handleNodeMove}
                   onPointerLeave={handleNodeLeave}
                 />
-                {portfolioEntries.length > 1 ? (
+                {portfolioEntries.length ? (
                   <div className="portfolio-preview-layer">
                     {portfolioEntries
-                      .filter((entry) => entry.id !== activePortfolio?.id)
                       .slice(0, PORTFOLIO_PREVIEW_SLOTS.length)
                       .map((entry, index) => (
                         <PortfolioPreviewAtom
