@@ -24,14 +24,8 @@
 ### CSV 업로드 후 대시보드
 
 샘플 포트폴리오를 업로드하면 종목별 노드, 수익 캘린더, 레이더 점수, 자산 비중 도구가 함께 열립니다.
+<img width="1506" height="799" alt="스크린샷 2026-05-04 오후 6 31 36" src="https://github.com/user-attachments/assets/036b3b7c-abbd-4021-b9d4-db421580d0d1" />
 
-![AtomFolio 대시보드 실행 화면](docs/assets/atomfolio-dashboard.png)
-
-### 모바일 화면
-
-플로팅 도구와 원자형 포트폴리오가 작은 화면에서도 잘리지 않도록 위치와 크기를 별도로 계산합니다.
-
-![AtomFolio 모바일 실행 화면](docs/assets/atomfolio-mobile.png)
 
 ## 프로젝트를 만든 과정
 
