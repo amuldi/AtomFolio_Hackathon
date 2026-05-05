@@ -58,8 +58,8 @@
 
 <img width="1489" height="790" alt="스크린샷 2026-05-05 오후 4 47 02" src="https://github.com/user-attachments/assets/9b7b5fe5-fe72-40b2-bef6-1bc7fd1ec98f" />
 
-이때 도구는 사용자의 스타일에 따라 이동시킬 수 있습니다.
 
+이때 도구는 사용자의 스타일에 따라 이동시킬 수 있습니다.
 <img width="1489" height="796" alt="스크린샷 2026-05-05 오후 4 47 40" src="https://github.com/user-attachments/assets/5a2b7b74-b8c8-4d76-8856-0872b3a168b6" />
 
 
