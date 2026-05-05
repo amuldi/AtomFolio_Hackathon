@@ -1,3 +1,4 @@
+![Uploading 스크린샷 2026-05-05 오후 4.45.17.png…]()
 # AtomFolio +
 
 투자 CSV를 업로드하면 종목 구성, 수익 흐름, 자산 비중, 위험/분산 상태를 자동으로 분석하고 원자형 포트폴리오 화면으로 보여주는 웹 대시보드입니다.
@@ -50,19 +51,15 @@
 
 첫 화면은 중앙 원자 코어, 설정 버튼, 업로드 버튼만 남겨 CSV 업로드 행동에 집중하도록 만들었습니다.
 
-![AtomFolio 홈 화면](docs/assets/atomfolio-home.png)
+![Uploading 스크린샷 2026-05-05 오후 4.45.17.png…]()
 
 ### CSV 업로드 후 대시보드
 
-샘플 CSV를 업로드하면 종목 노드가 중심 원자 주변에 펼쳐지고, 왼쪽 플로팅 도구에서 히트맵과 레이더 점수를 함께 확인할 수 있습니다.
+투자 데이터를 업로드하면 종목 노드가 중심 원자 주변에 펼쳐지고, 왼쪽 플로팅 도구에서 히트맵과 레이더 점수를 함께 확인할 수 있습니다. 이때 도구는 사용자의 스타일에 따라 이동시킬 수 있습니다.
 
-![AtomFolio 대시보드 실행 화면](docs/assets/atomfolio-dashboard.png)
+<img width="1489" height="790" alt="스크린샷 2026-05-05 오후 4 47 02" src="https://github.com/user-attachments/assets/9b7b5fe5-fe72-40b2-bef6-1bc7fd1ec98f" />
+<img width="1489" height="796" alt="스크린샷 2026-05-05 오후 4 47 40" src="https://github.com/user-attachments/assets/5a2b7b74-b8c8-4d76-8856-0872b3a168b6" />
 
-### 모바일 화면
-
-모바일에서는 플로팅 도구와 원자형 포트폴리오가 겹치거나 화면 밖으로 나가지 않도록 크기와 위치를 따로 계산합니다.
-
-![AtomFolio 모바일 실행 화면](docs/assets/atomfolio-mobile.png)
 
 ## 제작 과정
 
