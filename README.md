@@ -418,38 +418,45 @@ CSV 업로드
 flowchart TD
   User["사용자"] --> Browser["브라우저<br/>React + Vite SPA"]
 
-  Browser --> Upload["CSV 업로드<br/>FileReader + 인코딩 처리"]
-  Upload --> LocalParser["클라이언트 로컬 파서<br/>즉시 fallback 결과 생성"]
-  Upload --> PortfolioAPI["/api/portfolio/ingest"]
+  Browser --> FileReader["CSV 파일 읽기<br/>FileReader + UTF-8/EUC-KR 처리"]
+  FileReader --> ClientParser["클라이언트 로컬 파서<br/>fallback 결과 생성"]
+  FileReader --> ApiRequest["POST /api/portfolio/ingest"]
 
-  PortfolioAPI --> ServerPipeline["서버 업로드 파이프라인<br/>server/portfolioIngestion.mjs"]
-  ServerPipeline --> ParserCore["CSV 파싱 코어<br/>portfolioIngestionCore.js"]
-  ServerPipeline --> SecurityEnrichment["종목 메타데이터 보강<br/>securityEnrichment.mjs"]
-  ServerPipeline --> Agents["진단 에이전트<br/>schemaMapper / qualityGuard / explanationAgent"]
-
-  SecurityEnrichment --> Knowledge["종목 지식/보강 규칙<br/>securityKnowledge.js"]
-  Agents --> Payload["분석 응답<br/>items / timelineItems / diagnostics"]
-  ParserCore --> Payload
-  SecurityEnrichment --> Payload
-
-  Payload --> Browser
-  LocalParser --> Browser
-
-  Browser --> AtomView["원자형 포트폴리오 뷰"]
-  Browser --> Heatmap["수익 캘린더 히트맵"]
-  Browser --> Allocation["자산 비중 도넛"]
-  Browser --> Radar["레이더 점수"]
-  Browser --> Settings["설정/도구 위치<br/>localStorage"]
-
-  subgraph Deployment["배포 환경"]
-    Vercel["Vercel"]
-    ViteBuild["dist 정적 빌드"]
-    Functions["Vercel Functions<br/>api/*"]
+  subgraph Local["로컬 개발 환경"]
+    Vite["Vite Dev Server"]
+    NodeAPI["Node HTTP API<br/>server/index.mjs"]
+    Vite -->|/api proxy| NodeAPI
   end
 
-  Vercel --> ViteBuild
-  Vercel --> Functions
-  Functions --> PortfolioAPI
+  subgraph Production["Vercel 프로덕션 환경"]
+    CDN["Vercel CDN<br/>dist 정적 파일 서빙"]
+    Functions["Vercel Functions<br/>api/*"]
+    CDN --> Browser
+    ApiRequest --> Functions
+  end
+
+  ApiRequest --> NodeAPI
+  Functions --> IngestFunction["api/portfolio/ingest.js"]
+  IngestFunction --> Pipeline["server/portfolioIngestion.mjs"]
+  NodeAPI --> Pipeline
+
+  Pipeline --> ParserCore["portfolioIngestionCore.js<br/>CSV 파싱/컬럼 추론"]
+  Pipeline --> Enrichment["securityEnrichment.mjs<br/>종목 메타데이터 보강"]
+  Pipeline --> Agents["진단 모듈<br/>schemaMapper / qualityGuard / explanationAgent"]
+
+  Enrichment --> Knowledge["securityKnowledge.js<br/>종목 지식/보강 규칙"]
+
+  ParserCore --> Response["분석 응답"]
+  Enrichment --> Response
+  Agents --> Response
+  ClientParser --> Browser
+  Response --> Browser
+
+  Browser --> AtomView["원자형 포트폴리오"]
+  Browser --> Heatmap["수익 히트맵"]
+  Browser --> Allocation["자산 비중 도넛"]
+  Browser --> Radar["레이더 점수"]
+  Browser --> Storage["설정/도구 위치<br/>localStorage"]
 ```
 
 ## API
