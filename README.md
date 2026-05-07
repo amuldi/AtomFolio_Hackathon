@@ -412,6 +412,46 @@ CSV 업로드
   -> 원자형 뷰, 히트맵, 도넛, 레이더 점수 렌더링
 ```
 
+## 아키텍처
+
+```mermaid
+flowchart TD
+  User["사용자"] --> Browser["브라우저<br/>React + Vite SPA"]
+
+  Browser --> Upload["CSV 업로드<br/>FileReader + 인코딩 처리"]
+  Upload --> LocalParser["클라이언트 로컬 파서<br/>즉시 fallback 결과 생성"]
+  Upload --> PortfolioAPI["/api/portfolio/ingest"]
+
+  PortfolioAPI --> ServerPipeline["서버 업로드 파이프라인<br/>server/portfolioIngestion.mjs"]
+  ServerPipeline --> ParserCore["CSV 파싱 코어<br/>portfolioIngestionCore.js"]
+  ServerPipeline --> SecurityEnrichment["종목 메타데이터 보강<br/>securityEnrichment.mjs"]
+  ServerPipeline --> Agents["진단 에이전트<br/>schemaMapper / qualityGuard / explanationAgent"]
+
+  SecurityEnrichment --> Knowledge["종목 지식/보강 규칙<br/>securityKnowledge.js"]
+  Agents --> Payload["분석 응답<br/>items / timelineItems / diagnostics"]
+  ParserCore --> Payload
+  SecurityEnrichment --> Payload
+
+  Payload --> Browser
+  LocalParser --> Browser
+
+  Browser --> AtomView["원자형 포트폴리오 뷰"]
+  Browser --> Heatmap["수익 캘린더 히트맵"]
+  Browser --> Allocation["자산 비중 도넛"]
+  Browser --> Radar["레이더 점수"]
+  Browser --> Settings["설정/도구 위치<br/>localStorage"]
+
+  subgraph Deployment["배포 환경"]
+    Vercel["Vercel"]
+    ViteBuild["dist 정적 빌드"]
+    Functions["Vercel Functions<br/>api/*"]
+  end
+
+  Vercel --> ViteBuild
+  Vercel --> Functions
+  Functions --> PortfolioAPI
+```
+
 ## API
 
 ### `GET /api/health`
