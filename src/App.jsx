@@ -4730,7 +4730,6 @@ function PortfolioAllocationWidget({
   const text = textFor(language);
   const [open, setOpen] = useState(false);
   const pendingResetRef = useRef(0);
-  const lastAnchorSignatureRef = useRef('');
 
   const resolveAnchorRect = () =>
     anchorRef?.current?.getBoundingClientRect() ??
@@ -4849,20 +4848,6 @@ function PortfolioAllocationWidget({
     anchorSteps,
     resetSignal,
   ]);
-
-  useEffect(() => {
-    if (!anchorPosition || typeof window === 'undefined') {
-      return;
-    }
-
-    const nextSignature = `${Math.round(anchorPosition.x * 10) / 10}:${Math.round(anchorPosition.y * 10) / 10}:${anchorSteps}`;
-    if (lastAnchorSignatureRef.current === nextSignature) {
-      return;
-    }
-
-    lastAnchorSignatureRef.current = nextSignature;
-    allocationDock.snapToInitial();
-  }, [allocationDock.snapToInitial, anchorPosition?.x, anchorPosition?.y, anchorSteps]);
 
   useEffect(() => {
     if (!open || !visible) {
