@@ -22,6 +22,7 @@ export function FloatingRadarDock({
   anchorRef,
   anchorPosition,
   anchorSize,
+  externalDockRef,
   scorecard,
   axes,
   language,
@@ -104,6 +105,21 @@ export function FloatingRadarDock({
     return anchoredPosition();
   });
 
+  const assignDockRef = (node) => {
+    dockRef.current = node;
+
+    if (!externalDockRef) {
+      return;
+    }
+
+    if (typeof externalDockRef === 'function') {
+      externalDockRef(node);
+      return;
+    }
+
+    externalDockRef.current = node;
+  };
+
   const clampDockPosition = (nextX, nextY, options = {}) => {
     const margin = 18;
     const dockSize = scoreDockSizeFor(window.innerWidth);
@@ -128,11 +144,20 @@ export function FloatingRadarDock({
     };
   };
 
+  const commitPosition = (nextPosition) => {
+    setPosition((current) => {
+      const resolved =
+        typeof nextPosition === 'function' ? nextPosition(current) : nextPosition;
+      onPositionChange?.(resolved);
+      return resolved;
+    });
+  };
+
   const snapToAnchor = () => {
     hasUserMovedRef.current = false;
     clearStoredPosition(storageKey);
     const anchored = anchoredPosition();
-    setPosition(clampDockPosition(anchored.x, anchored.y, { expanded: false }));
+    commitPosition(clampDockPosition(anchored.x, anchored.y, { expanded: false }));
   };
 
   useEffect(() => {
@@ -141,7 +166,7 @@ export function FloatingRadarDock({
     }
 
     const syncPosition = () => {
-      setPosition((current) => {
+      commitPosition((current) => {
         const next = clampDockPosition(current.x, current.y);
         if (hasUserMovedRef.current) {
           return next;
@@ -168,7 +193,7 @@ export function FloatingRadarDock({
 
     hasUserMovedRef.current = true;
     setExpanded(true);
-    setPosition((current) => clampDockPosition(spawn.x ?? current.x, spawn.y ?? current.y));
+    commitPosition((current) => clampDockPosition(spawn.x ?? current.x, spawn.y ?? current.y));
   }, [spawn?.session]);
 
   useEffect(() => {
@@ -180,7 +205,7 @@ export function FloatingRadarDock({
     clearStoredPosition(storageKey);
     setExpanded(false);
     const anchored = anchoredPosition();
-    setPosition(clampDockPosition(anchored.x, anchored.y));
+    commitPosition(clampDockPosition(anchored.x, anchored.y));
   }, [resetSignal, storageKey]);
 
   useEffect(() => {
@@ -206,7 +231,7 @@ export function FloatingRadarDock({
     hasUserMovedRef.current = true;
     setDragging(true);
     document.body.style.cursor = 'grabbing';
-    setPosition(
+    commitPosition(
       clampDockPosition(
         pressRef.current.originX + (pressRef.current.lastX - pressRef.current.startX),
         pressRef.current.originY + (pressRef.current.lastY - pressRef.current.startY),
@@ -251,7 +276,7 @@ export function FloatingRadarDock({
 
       event.preventDefault();
       onInteract();
-      setPosition(
+      commitPosition(
         clampDockPosition(
           pressRef.current.originX + deltaX,
           pressRef.current.originY + deltaY,
@@ -348,7 +373,7 @@ export function FloatingRadarDock({
 
   return (
     <div
-      ref={dockRef}
+      ref={assignDockRef}
       className={`score-dock${panelSide === 'left' ? ' is-flipped' : ''}${expanded ? ' is-expanded' : ''}${dragging ? ' is-dragging' : ''}${visible ? '' : ' is-hidden'}`}
       style={{ transform: `translate3d(${position.x}px, ${position.y}px, 0)` }}
     >

@@ -327,8 +327,10 @@ export function PortfolioAllocationWidget({
   allocation,
   language,
   anchorRef,
+  anchorSelector,
   anchorPosition,
   anchorSize,
+  anchorSteps = 1,
   resetSignal,
   visible = true,
   settingsOpen = false,
@@ -337,11 +339,28 @@ export function PortfolioAllocationWidget({
   const text = textFor(language);
   const [open, setOpen] = useState(false);
   const pendingResetRef = useRef(0);
+  const lastAnchorSignatureRef = useRef('');
 
   const allocationDock = useFloatingHandle({
     initialPosition: (win) => {
       const size = allocationWidgetSizeFor(win.innerWidth);
       const currentAnchorSize = anchorSize ?? scoreDockSizeFor(win.innerWidth);
+      const rect =
+        anchorRef?.current?.getBoundingClientRect() ??
+        (anchorSelector && typeof document !== 'undefined'
+          ? document.querySelector(anchorSelector)?.getBoundingClientRect()
+          : null);
+
+      if (rect) {
+        return stackDockBelowRect(
+          rect,
+          currentAnchorSize,
+          size,
+          win.innerWidth,
+          win.innerHeight,
+          anchorSteps,
+        );
+      }
 
       if (anchorPosition) {
         return stackDockBelow(
@@ -351,19 +370,7 @@ export function PortfolioAllocationWidget({
           size,
           win.innerWidth,
           win.innerHeight,
-        );
-      }
-
-      const rect = anchorRef?.current?.getBoundingClientRect();
-
-      if (rect) {
-        return stackDockBelowRect(
-          rect,
-          toolTriggerSizeFor(win.innerWidth),
-          size,
-          win.innerWidth,
-          win.innerHeight,
-          4,
+          anchorSteps,
         );
       }
 
@@ -406,7 +413,7 @@ export function PortfolioAllocationWidget({
     onPress: () => {
       setOpen((current) => !current);
     },
-    followAnchor: false,
+    continuousFollow: true,
     storageKey: STORAGE_KEYS.allocationDockPosition,
   });
 
@@ -446,8 +453,23 @@ export function PortfolioAllocationWidget({
     allocationDock.snapToInitial,
     anchorPosition?.x,
     anchorPosition?.y,
+    anchorSteps,
     resetSignal,
   ]);
+
+  useEffect(() => {
+    if (!anchorPosition || typeof window === 'undefined') {
+      return;
+    }
+
+    const nextSignature = `${Math.round(anchorPosition.x * 10) / 10}:${Math.round(anchorPosition.y * 10) / 10}:${anchorSteps}`;
+    if (lastAnchorSignatureRef.current === nextSignature) {
+      return;
+    }
+
+    lastAnchorSignatureRef.current = nextSignature;
+    allocationDock.snapToInitial();
+  }, [allocationDock.snapToInitial, anchorPosition?.x, anchorPosition?.y, anchorSteps]);
 
   useEffect(() => {
     if (!open || !visible) {

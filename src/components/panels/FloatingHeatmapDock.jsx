@@ -33,6 +33,7 @@ export function FloatingHeatmapDock({
 }) {
   const dockRef = useRef(null);
   const hasUserMovedRef = useRef(false);
+  const suppressHandleClickRef = useRef(false);
   const storageKey = STORAGE_KEYS.heatmapDockPosition;
   const pressRef = useRef({
     pointerId: null,
@@ -192,6 +193,7 @@ export function FloatingHeatmapDock({
     pressRef.current.holdTimer = null;
     pressRef.current.dragStarted = true;
     hasUserMovedRef.current = true;
+    suppressHandleClickRef.current = true;
     setDragging(true);
     document.body.style.cursor = 'grabbing';
     setPosition(
@@ -223,9 +225,14 @@ export function FloatingHeatmapDock({
       const deltaX = event.clientX - pressRef.current.startX;
       const deltaY = event.clientY - pressRef.current.startY;
       const distanceSquared = deltaX * deltaX + deltaY * deltaY;
+      const action = pressRef.current.action;
+      const dragDistanceThreshold = action === 'toggle' ? 36 : 9;
+      const shouldStartDrag =
+        distanceSquared > dragDistanceThreshold ||
+        (action !== 'toggle' && performance.now() - pressRef.current.pressAt > 90);
 
       if (!pressRef.current.dragStarted) {
-        if (distanceSquared > 9 || performance.now() - pressRef.current.pressAt > 90) {
+        if (shouldStartDrag) {
           beginDrag();
         } else {
           return;
@@ -262,6 +269,7 @@ export function FloatingHeatmapDock({
 
       if (wasClick && action === 'toggle' && !iconOnly) {
         onInteract();
+        suppressHandleClickRef.current = true;
         setExpanded((current) => !current);
       }
     };
@@ -309,11 +317,26 @@ export function FloatingHeatmapDock({
     pressRef.current.pressAt = performance.now();
     pressRef.current.dragStarted = false;
     pressRef.current.action = action;
-    pressRef.current.holdTimer = window.setTimeout(beginDrag, holdDelay);
+    pressRef.current.holdTimer =
+      Number.isFinite(holdDelay) && holdDelay >= 0
+        ? window.setTimeout(beginDrag, holdDelay)
+        : null;
   };
 
   const handleDockPointerDown = (event) => {
-    startPress(event, 'toggle', { capture: true, preventDefault: true, stopPropagation: true, holdDelay: 90 });
+    startPress(event, 'toggle', { capture: true, preventDefault: false, stopPropagation: true, holdDelay: null });
+  };
+
+  const handleDockClick = (event) => {
+    event.stopPropagation();
+
+    if (iconOnly || suppressHandleClickRef.current) {
+      suppressHandleClickRef.current = false;
+      return;
+    }
+
+    onInteract();
+    setExpanded((current) => !current);
   };
 
   const handleDockSurfacePointerDown = (event) => {
@@ -335,6 +358,7 @@ export function FloatingHeatmapDock({
         type="button"
         className="heatmap-dock__handle"
         onPointerDown={handleDockPointerDown}
+        onClick={handleDockClick}
         aria-expanded={expanded}
         aria-label={iconOnly ? textFor(language).contributionAria : textFor(language).heatmapAria}
       >

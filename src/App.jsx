@@ -894,6 +894,7 @@ function useFloatingHandle({
   onPress,
   resetSignal,
   followAnchor = true,
+  continuousFollow = false,
   storageKey = null,
 }) {
   const containerRef = useRef(null);
@@ -967,34 +968,71 @@ function useFloatingHandle({
     };
   };
 
+  const reusePositionIfUnchanged = (current, next) =>
+    Math.abs(current.x - next.x) < 0.01 && Math.abs(current.y - next.y) < 0.01
+      ? current
+      : next;
+
   useEffect(() => {
     if (typeof window === 'undefined') {
       return undefined;
     }
 
+    let frameId = 0;
+    let cancelled = false;
+    let remainingFrames = 0;
+
     const syncPosition = () => {
+      if (cancelled) {
+        return;
+      }
+
       setPosition((current) => {
         if (hasUserMovedRef.current) {
-          return clampPosition(current.x, current.y);
+          return reusePositionIfUnchanged(current, clampPosition(current.x, current.y));
         }
 
         if (!followAnchor) {
-          return clampPosition(current.x, current.y);
+          return reusePositionIfUnchanged(current, clampPosition(current.x, current.y));
         }
 
         const anchored = initialPosition(window);
-        return clampPosition(anchored.x, anchored.y);
+        return reusePositionIfUnchanged(current, clampPosition(anchored.x, anchored.y));
       });
+
+      remainingFrames -= 1;
+      if (
+        followAnchor &&
+        !hasUserMovedRef.current &&
+        remainingFrames > 0
+      ) {
+        frameId = window.requestAnimationFrame(syncPosition);
+        return;
+      }
+
+      frameId = 0;
     };
 
-    const frameId = window.requestAnimationFrame(syncPosition);
-    window.addEventListener('resize', syncPosition);
+    const scheduleSync = (frames = continuousFollow ? 120 : 18) => {
+      remainingFrames = Math.max(remainingFrames, frames);
+      if (!frameId) {
+        frameId = window.requestAnimationFrame(syncPosition);
+      }
+    };
+
+    const handleResize = () => scheduleSync();
+
+    scheduleSync();
+    window.addEventListener('resize', handleResize);
 
     return () => {
-      window.cancelAnimationFrame(frameId);
-      window.removeEventListener('resize', syncPosition);
+      cancelled = true;
+      window.removeEventListener('resize', handleResize);
+      if (frameId) {
+        window.cancelAnimationFrame(frameId);
+      }
     };
-  }, [fallbackSize, followAnchor, initialPosition, measureBounds]);
+  }, [continuousFollow, fallbackSize, followAnchor, initialPosition, measureBounds]);
 
   const beginDrag = () => {
     if (pressRef.current.pointerId === null) {
@@ -1073,9 +1111,14 @@ function useFloatingHandle({
       const deltaX = event.clientX - pressRef.current.startX;
       const deltaY = event.clientY - pressRef.current.startY;
       const distanceSquared = deltaX * deltaX + deltaY * deltaY;
+      const action = pressRef.current.action;
+      const dragDistanceThreshold = action === 'toggle' ? 36 : 9;
+      const shouldStartDrag =
+        distanceSquared > dragDistanceThreshold ||
+        (action !== 'toggle' && performance.now() - pressRef.current.pressAt > 90);
 
       if (!pressRef.current.dragStarted) {
-        if (distanceSquared > 9 || performance.now() - pressRef.current.pressAt > 90) {
+        if (shouldStartDrag) {
           beginDrag();
         } else {
           return;
@@ -1168,7 +1211,10 @@ function useFloatingHandle({
     pressRef.current.pressAt = performance.now();
     pressRef.current.dragStarted = false;
     pressRef.current.action = action;
-    pressRef.current.holdTimer = window.setTimeout(beginDrag, holdDelay);
+    pressRef.current.holdTimer =
+      Number.isFinite(holdDelay) && holdDelay >= 0
+        ? window.setTimeout(beginDrag, holdDelay)
+        : null;
   };
 
   const handlePointerDown = (event) => {
@@ -1176,7 +1222,7 @@ function useFloatingHandle({
       capture: true,
       preventDefault: true,
       stopPropagation: true,
-      holdDelay: 90,
+      holdDelay: null,
     });
   };
 
@@ -3685,12 +3731,14 @@ function FloatingGroupDock({
       const deltaX = event.clientX - pressRef.current.startX;
       const deltaY = event.clientY - pressRef.current.startY;
       const distanceSquared = deltaX * deltaX + deltaY * deltaY;
+      const action = pressRef.current.action;
+      const dragDistanceThreshold = action === 'toggle' ? 36 : 9;
+      const shouldStartDrag =
+        distanceSquared > dragDistanceThreshold ||
+        (action !== 'toggle' && performance.now() - pressRef.current.pressAt > 140);
 
       if (!pressRef.current.dragStarted) {
-        if (
-          distanceSquared > 36 ||
-          performance.now() - pressRef.current.pressAt > 140
-        ) {
+        if (shouldStartDrag) {
           beginDrag();
         } else {
           return;
@@ -3783,7 +3831,10 @@ function FloatingGroupDock({
     pressRef.current.pressAt = performance.now();
     pressRef.current.dragStarted = false;
     pressRef.current.action = action;
-    pressRef.current.holdTimer = window.setTimeout(beginDrag, holdDelay);
+    pressRef.current.holdTimer =
+      Number.isFinite(holdDelay) && holdDelay >= 0
+        ? window.setTimeout(beginDrag, holdDelay)
+        : null;
   };
 
   const handleDockPointerDown = (event) => {
@@ -3791,7 +3842,7 @@ function FloatingGroupDock({
       capture: true,
       preventDefault: true,
       stopPropagation: true,
-      holdDelay: 140,
+      holdDelay: null,
     });
   };
 
@@ -4666,8 +4717,10 @@ function PortfolioAllocationWidget({
   allocation,
   language,
   anchorRef,
+  anchorSelector,
   anchorPosition,
   anchorSize,
+  anchorSteps = 1,
   resetSignal,
   visible = true,
   settingsOpen = false,
@@ -4677,11 +4730,30 @@ function PortfolioAllocationWidget({
   const text = textFor(language);
   const [open, setOpen] = useState(false);
   const pendingResetRef = useRef(0);
+  const lastAnchorSignatureRef = useRef('');
+
+  const resolveAnchorRect = () =>
+    anchorRef?.current?.getBoundingClientRect() ??
+    (anchorSelector && typeof document !== 'undefined'
+      ? document.querySelector(anchorSelector)?.getBoundingClientRect()
+      : null);
 
   const allocationDock = useFloatingHandle({
     initialPosition: (win) => {
       const size = allocationWidgetSizeFor(win.innerWidth);
       const currentAnchorSize = anchorSize ?? scoreDockSizeFor(win.innerWidth);
+      const rect = resolveAnchorRect();
+
+      if (rect) {
+        return stackDockBelowRect(
+          rect,
+          currentAnchorSize,
+          size,
+          win.innerWidth,
+          win.innerHeight,
+          anchorSteps,
+        );
+      }
 
       if (anchorPosition) {
         return stackDockBelow(
@@ -4691,19 +4763,7 @@ function PortfolioAllocationWidget({
           size,
           win.innerWidth,
           win.innerHeight,
-        );
-      }
-
-      const rect = anchorRef?.current?.getBoundingClientRect();
-
-      if (rect) {
-        return stackDockBelowRect(
-          rect,
-          toolTriggerSizeFor(win.innerWidth),
-          size,
-          win.innerWidth,
-          win.innerHeight,
-          4,
+          anchorSteps,
         );
       }
 
@@ -4746,7 +4806,7 @@ function PortfolioAllocationWidget({
     onPress: () => {
       setOpen((current) => !current);
     },
-    followAnchor: false,
+    continuousFollow: true,
     storageKey: STORAGE_KEYS.allocationDockPosition,
   });
 
@@ -4786,8 +4846,23 @@ function PortfolioAllocationWidget({
     allocationDock.snapToInitial,
     anchorPosition?.x,
     anchorPosition?.y,
+    anchorSteps,
     resetSignal,
   ]);
+
+  useEffect(() => {
+    if (!anchorPosition || typeof window === 'undefined') {
+      return;
+    }
+
+    const nextSignature = `${Math.round(anchorPosition.x * 10) / 10}:${Math.round(anchorPosition.y * 10) / 10}:${anchorSteps}`;
+    if (lastAnchorSignatureRef.current === nextSignature) {
+      return;
+    }
+
+    lastAnchorSignatureRef.current = nextSignature;
+    allocationDock.snapToInitial();
+  }, [allocationDock.snapToInitial, anchorPosition?.x, anchorPosition?.y, anchorSteps]);
 
   useEffect(() => {
     if (!open || !visible) {
@@ -4926,6 +5001,7 @@ function FloatingHeatmapDock({
 }) {
   const dockRef = useRef(null);
   const hasUserMovedRef = useRef(false);
+  const suppressHandleClickRef = useRef(false);
   const storageKey = STORAGE_KEYS.heatmapDockPosition;
   const pressRef = useRef({
     pointerId: null,
@@ -5087,6 +5163,7 @@ function FloatingHeatmapDock({
     pressRef.current.holdTimer = null;
     pressRef.current.dragStarted = true;
     hasUserMovedRef.current = true;
+    suppressHandleClickRef.current = true;
     setDragging(true);
     document.body.style.cursor = 'grabbing';
     setPosition(
@@ -5118,9 +5195,14 @@ function FloatingHeatmapDock({
       const deltaX = event.clientX - pressRef.current.startX;
       const deltaY = event.clientY - pressRef.current.startY;
       const distanceSquared = deltaX * deltaX + deltaY * deltaY;
+      const action = pressRef.current.action;
+      const dragDistanceThreshold = action === 'toggle' ? 36 : 9;
+      const shouldStartDrag =
+        distanceSquared > dragDistanceThreshold ||
+        (action !== 'toggle' && performance.now() - pressRef.current.pressAt > 90);
 
       if (!pressRef.current.dragStarted) {
-        if (distanceSquared > 9 || performance.now() - pressRef.current.pressAt > 90) {
+        if (shouldStartDrag) {
           beginDrag();
         } else {
           return;
@@ -5157,6 +5239,7 @@ function FloatingHeatmapDock({
 
       if (wasClick && action === 'toggle' && !iconOnly) {
         onInteract();
+        suppressHandleClickRef.current = true;
         setExpanded((current) => !current);
       }
     };
@@ -5213,16 +5296,31 @@ function FloatingHeatmapDock({
     pressRef.current.pressAt = performance.now();
     pressRef.current.dragStarted = false;
     pressRef.current.action = action;
-    pressRef.current.holdTimer = window.setTimeout(beginDrag, holdDelay);
+    pressRef.current.holdTimer =
+      Number.isFinite(holdDelay) && holdDelay >= 0
+        ? window.setTimeout(beginDrag, holdDelay)
+        : null;
   };
 
   const handleDockPointerDown = (event) => {
     startPress(event, 'toggle', {
       capture: true,
-      preventDefault: true,
+      preventDefault: false,
       stopPropagation: true,
-      holdDelay: 90,
+      holdDelay: null,
     });
+  };
+
+  const handleDockClick = (event) => {
+    event.stopPropagation();
+
+    if (iconOnly || suppressHandleClickRef.current) {
+      suppressHandleClickRef.current = false;
+      return;
+    }
+
+    onInteract();
+    setExpanded((current) => !current);
   };
 
   const handleDockSurfacePointerDown = (event) => {
@@ -5252,6 +5350,7 @@ function FloatingHeatmapDock({
         type="button"
         className="heatmap-dock__handle"
         onPointerDown={handleDockPointerDown}
+        onClick={handleDockClick}
         aria-expanded={expanded}
         aria-label={iconOnly ? textFor(language).contributionAria : textFor(language).heatmapAria}
       >
@@ -5342,12 +5441,23 @@ function FloatingToolTrigger({
 
   const clampTriggerPosition = (nextX, nextY) => {
     const margin = 18;
-    const width = dockRef.current?.offsetWidth ?? scoreDockSizeFor(window.innerWidth);
-    const height = dockRef.current?.offsetHeight ?? scoreDockSizeFor(window.innerWidth);
+    const viewportWidth = window.innerWidth;
+    const triggerSize = scoreDockSizeFor(viewportWidth);
+    const width = dockRef.current?.offsetWidth ?? triggerSize;
+    const height = dockRef.current?.offsetHeight ?? triggerSize;
+    const stackReachY = open
+      ? triggerSize * 0.5 +
+        toolDockStackStepFor(viewportWidth) * 4 +
+        allocationWidgetSizeFor(viewportWidth) * 0.5
+      : height;
 
     return {
       x: clamp(nextX, margin, window.innerWidth - width - margin),
-      y: clamp(nextY, margin, window.innerHeight - height - margin),
+      y: clamp(
+        nextY,
+        margin,
+        Math.max(margin, window.innerHeight - margin - stackReachY),
+      ),
     };
   };
 
@@ -5375,7 +5485,7 @@ function FloatingToolTrigger({
       window.cancelAnimationFrame(frameId);
       window.removeEventListener('resize', syncPosition);
     };
-  }, [anchorRef, anchorPosition?.x, anchorPosition?.y]);
+  }, [anchorRef, anchorPosition?.x, anchorPosition?.y, open]);
 
   useEffect(() => {
     onPositionChange?.(position);
@@ -5563,6 +5673,7 @@ function FloatingRadarDock({
   anchorRef,
   anchorPosition,
   anchorSize,
+  externalDockRef,
   scorecard,
   axes,
   language,
@@ -5644,6 +5755,21 @@ function FloatingRadarDock({
     return anchoredPosition();
   });
 
+  const assignDockRef = (node) => {
+    dockRef.current = node;
+
+    if (!externalDockRef) {
+      return;
+    }
+
+    if (typeof externalDockRef === 'function') {
+      externalDockRef(node);
+      return;
+    }
+
+    externalDockRef.current = node;
+  };
+
   const clampDockPosition = (nextX, nextY, options = {}) => {
     const margin = 18;
     const dockSize = scoreDockSizeFor(window.innerWidth);
@@ -5668,13 +5794,22 @@ function FloatingRadarDock({
     };
   };
 
+  const commitPosition = (nextPosition) => {
+    setPosition((current) => {
+      const resolved =
+        typeof nextPosition === 'function' ? nextPosition(current) : nextPosition;
+      onPositionChange?.(resolved);
+      return resolved;
+    });
+  };
+
   useEffect(() => {
     if (typeof window === 'undefined') {
       return undefined;
     }
 
     const syncPosition = () => {
-      setPosition((current) => {
+      commitPosition((current) => {
         const next = clampDockPosition(current.x, current.y);
         if (hasUserMovedRef.current) {
           return next;
@@ -5701,7 +5836,7 @@ function FloatingRadarDock({
 
     hasUserMovedRef.current = true;
     setExpanded(true);
-    setPosition((current) => clampDockPosition(spawn.x ?? current.x, spawn.y ?? current.y));
+    commitPosition((current) => clampDockPosition(spawn.x ?? current.x, spawn.y ?? current.y));
   }, [spawn?.session]);
 
   useEffect(() => {
@@ -5713,7 +5848,7 @@ function FloatingRadarDock({
     clearStoredPosition(storageKey);
     setExpanded(false);
     const anchored = anchoredPosition();
-    setPosition(clampDockPosition(anchored.x, anchored.y));
+    commitPosition(clampDockPosition(anchored.x, anchored.y));
   }, [resetSignal, storageKey]);
 
   useEffect(() => {
@@ -5743,7 +5878,7 @@ function FloatingRadarDock({
     hasUserMovedRef.current = true;
     setDragging(true);
     document.body.style.cursor = 'grabbing';
-    setPosition(
+    commitPosition(
       clampDockPosition(
         pressRef.current.originX + (pressRef.current.lastX - pressRef.current.startX),
         pressRef.current.originY + (pressRef.current.lastY - pressRef.current.startY),
@@ -5788,7 +5923,7 @@ function FloatingRadarDock({
 
       event.preventDefault();
       onInteract();
-      setPosition(
+      commitPosition(
         clampDockPosition(
           pressRef.current.originX + deltaX,
           pressRef.current.originY + deltaY,
@@ -5903,7 +6038,7 @@ function FloatingRadarDock({
 
   return (
     <div
-      ref={dockRef}
+      ref={assignDockRef}
       className={`score-dock${panelSide === 'left' ? ' is-flipped' : ''}${expanded ? ' is-expanded' : ''}${dragging ? ' is-dragging' : ''}${visible ? '' : ' is-hidden'}`}
       style={{
         transform: `translate3d(${position.x}px, ${position.y}px, 0)`,
@@ -6182,6 +6317,7 @@ export default function App() {
   const uploadButtonRef = useRef(null);
   const uploadPlusWrapRef = useRef(null);
   const toolTriggerRef = useRef(null);
+  const scoreDockRef = useRef(null);
   const settingsRef = useRef(null);
   const atomsRef = useRef(generateAtomLayout([]).map(createAtomState));
   const cameraRef = useRef(createSceneCameraRig());
@@ -7859,6 +7995,7 @@ export default function App() {
             anchorRef={toolTriggerRef}
             anchorPosition={heatmapDockPosition}
             anchorSize={heatmapDockSizeFor(typeof window === 'undefined' ? 1280 : window.innerWidth)}
+            externalDockRef={scoreDockRef}
             scorecard={portfolioScorecard}
             axes={scoreAxes}
             language={language}
@@ -7890,24 +8027,22 @@ export default function App() {
               setShowGroupDock(true);
               setShowScoreDock(true);
             }}
-            onResetAlignment={() => {
-              setShowGroupDock(true);
-              setShowScoreDock(true);
-              setDockResetAt(performance.now());
-            }}
+            onResetAlignment={handleResetDockLayout}
             onPositionChange={setToolTriggerPosition}
             layerStyle={floatingLayerStyleFor('tool-menu')}
             onInteract={interactWithToolMenu}
           />
         ) : null}
 
-        {showPortfolioChrome && portfolioAllocation && showScoreDock && scoreDockPosition ? (
+        {showPortfolioChrome && portfolioAllocation && showScoreDock ? (
           <PortfolioAllocationWidget
             allocation={portfolioAllocation}
             language={language}
             anchorRef={toolTriggerRef}
-            anchorPosition={scoreDockPosition}
-            anchorSize={scoreDockSizeFor(typeof window === 'undefined' ? 1280 : window.innerWidth)}
+            anchorSelector=".tool-menu--floating"
+            anchorPosition={toolTriggerPosition}
+            anchorSize={toolTriggerSizeFor(typeof window === 'undefined' ? 1280 : window.innerWidth)}
+            anchorSteps={4}
             resetSignal={dockResetAt}
             visible={toolTrayOpen}
             settingsOpen={settingsOpen}

@@ -211,9 +211,14 @@ export function FloatingGroupDock({
       const deltaX = event.clientX - pressRef.current.startX;
       const deltaY = event.clientY - pressRef.current.startY;
       const distanceSquared = deltaX * deltaX + deltaY * deltaY;
+      const action = pressRef.current.action;
+      const dragDistanceThreshold = action === 'toggle' ? 36 : 9;
+      const shouldStartDrag =
+        distanceSquared > dragDistanceThreshold ||
+        (action !== 'toggle' && performance.now() - pressRef.current.pressAt > 140);
 
       if (!pressRef.current.dragStarted) {
-        if (distanceSquared > 36 || performance.now() - pressRef.current.pressAt > 140) {
+        if (shouldStartDrag) {
           beginDrag();
         } else {
           return;
@@ -297,11 +302,14 @@ export function FloatingGroupDock({
     pressRef.current.pressAt = performance.now();
     pressRef.current.dragStarted = false;
     pressRef.current.action = action;
-    pressRef.current.holdTimer = window.setTimeout(beginDrag, holdDelay);
+    pressRef.current.holdTimer =
+      Number.isFinite(holdDelay) && holdDelay >= 0
+        ? window.setTimeout(beginDrag, holdDelay)
+        : null;
   };
 
   const handleDockPointerDown = (event) => {
-    startPress(event, 'toggle', { capture: true, preventDefault: true, stopPropagation: true, holdDelay: 140 });
+    startPress(event, 'toggle', { capture: true, preventDefault: true, stopPropagation: true, holdDelay: null });
   };
 
   const handleDockSurfacePointerDown = (event) => {

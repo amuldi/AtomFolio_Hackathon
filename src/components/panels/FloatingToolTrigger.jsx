@@ -1,6 +1,11 @@
 import { useRef, useState, useEffect } from 'react';
 import { clamp } from '../../utils/math.js';
-import { uiInsetFor, scoreDockSizeFor } from '../../utils/layout.js';
+import {
+  uiInsetFor,
+  scoreDockSizeFor,
+  toolDockStackStepFor,
+  allocationWidgetSizeFor,
+} from '../../utils/layout.js';
 import {
   readStoredPosition,
   writeStoredPosition,
@@ -83,12 +88,23 @@ export function FloatingToolTrigger({
 
   const clampTriggerPosition = (nextX, nextY) => {
     const margin = 18;
-    const width = dockRef.current?.offsetWidth ?? scoreDockSizeFor(window.innerWidth);
-    const height = dockRef.current?.offsetHeight ?? scoreDockSizeFor(window.innerWidth);
+    const viewportWidth = window.innerWidth;
+    const triggerSize = scoreDockSizeFor(viewportWidth);
+    const width = dockRef.current?.offsetWidth ?? triggerSize;
+    const height = dockRef.current?.offsetHeight ?? triggerSize;
+    const stackReachY = open
+      ? triggerSize * 0.5 +
+        toolDockStackStepFor(viewportWidth) * 4 +
+        allocationWidgetSizeFor(viewportWidth) * 0.5
+      : height;
 
     return {
       x: clamp(nextX, margin, window.innerWidth - width - margin),
-      y: clamp(nextY, margin, window.innerHeight - height - margin),
+      y: clamp(
+        nextY,
+        margin,
+        Math.max(margin, window.innerHeight - margin - stackReachY),
+      ),
     };
   };
 
@@ -116,7 +132,7 @@ export function FloatingToolTrigger({
       window.cancelAnimationFrame(frameId);
       window.removeEventListener('resize', syncPosition);
     };
-  }, [anchorRef, anchorPosition?.x, anchorPosition?.y]);
+  }, [anchorRef, anchorPosition?.x, anchorPosition?.y, open]);
 
   useEffect(() => {
     onPositionChange?.(position);

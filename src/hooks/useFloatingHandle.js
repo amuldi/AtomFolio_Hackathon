@@ -11,6 +11,7 @@ export function useFloatingHandle({
   onPress,
   resetSignal,
   followAnchor = true,
+  continuousFollow = false,
   storageKey = null,
 }) {
   const containerRef = useRef(null);
@@ -84,34 +85,71 @@ export function useFloatingHandle({
     };
   };
 
+  const reusePositionIfUnchanged = (current, next) =>
+    Math.abs(current.x - next.x) < 0.01 && Math.abs(current.y - next.y) < 0.01
+      ? current
+      : next;
+
   useEffect(() => {
     if (typeof window === 'undefined') {
       return undefined;
     }
 
+    let frameId = 0;
+    let cancelled = false;
+    let remainingFrames = 0;
+
     const syncPosition = () => {
+      if (cancelled) {
+        return;
+      }
+
       setPosition((current) => {
         if (hasUserMovedRef.current) {
-          return clampPosition(current.x, current.y);
+          return reusePositionIfUnchanged(current, clampPosition(current.x, current.y));
         }
 
         if (!followAnchor) {
-          return clampPosition(current.x, current.y);
+          return reusePositionIfUnchanged(current, clampPosition(current.x, current.y));
         }
 
         const anchored = initialPosition(window);
-        return clampPosition(anchored.x, anchored.y);
+        return reusePositionIfUnchanged(current, clampPosition(anchored.x, anchored.y));
       });
+
+      remainingFrames -= 1;
+      if (
+        followAnchor &&
+        !hasUserMovedRef.current &&
+        remainingFrames > 0
+      ) {
+        frameId = window.requestAnimationFrame(syncPosition);
+        return;
+      }
+
+      frameId = 0;
     };
 
-    const frameId = window.requestAnimationFrame(syncPosition);
-    window.addEventListener('resize', syncPosition);
+    const scheduleSync = (frames = continuousFollow ? 120 : 18) => {
+      remainingFrames = Math.max(remainingFrames, frames);
+      if (!frameId) {
+        frameId = window.requestAnimationFrame(syncPosition);
+      }
+    };
+
+    const handleResize = () => scheduleSync();
+
+    scheduleSync();
+    window.addEventListener('resize', handleResize);
 
     return () => {
-      window.cancelAnimationFrame(frameId);
-      window.removeEventListener('resize', syncPosition);
+      cancelled = true;
+      window.removeEventListener('resize', handleResize);
+      if (frameId) {
+        window.cancelAnimationFrame(frameId);
+      }
     };
-  }, [fallbackSize, followAnchor, initialPosition, measureBounds]);
+  }, [continuousFollow, fallbackSize, followAnchor, initialPosition, measureBounds]);
 
   const beginDrag = () => {
     if (pressRef.current.pointerId === null) {
@@ -190,9 +228,14 @@ export function useFloatingHandle({
       const deltaX = event.clientX - pressRef.current.startX;
       const deltaY = event.clientY - pressRef.current.startY;
       const distanceSquared = deltaX * deltaX + deltaY * deltaY;
+      const action = pressRef.current.action;
+      const dragDistanceThreshold = action === 'toggle' ? 36 : 9;
+      const shouldStartDrag =
+        distanceSquared > dragDistanceThreshold ||
+        (action !== 'toggle' && performance.now() - pressRef.current.pressAt > 90);
 
       if (!pressRef.current.dragStarted) {
-        if (distanceSquared > 9 || performance.now() - pressRef.current.pressAt > 90) {
+        if (shouldStartDrag) {
           beginDrag();
         } else {
           return;
@@ -285,7 +328,10 @@ export function useFloatingHandle({
     pressRef.current.pressAt = performance.now();
     pressRef.current.dragStarted = false;
     pressRef.current.action = action;
-    pressRef.current.holdTimer = window.setTimeout(beginDrag, holdDelay);
+    pressRef.current.holdTimer =
+      Number.isFinite(holdDelay) && holdDelay >= 0
+        ? window.setTimeout(beginDrag, holdDelay)
+        : null;
   };
 
   const handlePointerDown = (event) => {
@@ -293,7 +339,7 @@ export function useFloatingHandle({
       capture: true,
       preventDefault: true,
       stopPropagation: true,
-      holdDelay: 90,
+      holdDelay: null,
     });
   };
 
