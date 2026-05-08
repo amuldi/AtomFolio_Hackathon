@@ -6692,9 +6692,7 @@ export default function App() {
 
       const shouldAutoRotate =
         !motionPreference.reduced &&
-        !isDraggingStructure &&
-        !interactionRef.current.hoveringAtomId &&
-        !interactionRef.current.selectedAtomId;
+        !isDraggingStructure;
 
       if (!motionPreference.reduced && !isDraggingStructure && hasDragSpin) {
         spinQuaternion.setFromAxisAngle(
