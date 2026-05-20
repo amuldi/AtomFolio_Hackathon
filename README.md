@@ -635,3 +635,15 @@ curl -s -X POST https://atomfolio-plus.vercel.app/api/portfolio/ingest \
 ## 주의 사항
 
 이 프로젝트는 투자 데이터를 시각화하고 분석 기준을 설명하는 대시보드입니다. 표시되는 점수와 분류는 투자 판단을 돕기 위한 참고 정보이며, 금융 투자 자문이나 매매 권유가 아닙니다.
+
+## 해커톤 참여 정보
+
+AtomFolio +는 DAKER/데이콘 월간 해커톤 **「투자 데이터를 시각화하라 - Skills 기반 대시보드 설계」** 참여를 위해 정리한 프로젝트입니다.
+
+- 대회 링크: [DAKER 해커톤 페이지](https://daker.ai/public/hackathons/hackathon-investment-data-skills-dashboard)
+- 대회 주제: 분석 가이드(MD)를 설계하고 바이브 코딩으로 투자 분석 대시보드를 구현하는 해커톤
+- 참여 방향: `Skills.md`에 투자 데이터 해석 규칙과 대시보드 생성 기준을 먼저 정의한 뒤, 이를 기반으로 CSV 자동 추론, 종목 메타데이터 보강, 원자형 포트폴리오 시각화, 수익 히트맵, 자산 비중 도넛, 레이더 점수 차트를 구현
+- 제출 저장소: [amuldi/AtomFolio_Hackathon](https://github.com/amuldi/AtomFolio_Hackathon)
+- 마감일: 2026년 4월 30일 10:00
+
+이 저장소는 해커톤 제출 맥락을 명확히 하기 위해 기존 프로젝트 설명은 유지하고, 대회 참여 정보만 별도 섹션으로 덧붙였습니다.
